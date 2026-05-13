@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
     OpenAI = None
 
 APP_TITLE = "SocksLover Mini ShotFlow"
-APP_VERSION = "MVP v4.4"
+APP_VERSION = "MVP v4.5 Lifestyle First"
 DEFAULT_MODEL = "gpt-4.1-mini"
 OUTPUT_DIR = "outputs"
 ZIP_DIR = os.path.join(OUTPUT_DIR, "zips")
@@ -32,6 +32,20 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 CATEGORY_OPTIONS = ["Bag", "Socks", "Hat / Scarf", "Accessory", "Other"]
 STYLE_OPTIONS = ["Clean ecommerce", "Cute lifestyle", "Premium minimal", "Daily outing"]
+VIDEO_STRATEGY_OPTIONS = {
+    "Lifestyle First / 착샷 우선": {
+        "summary": "모델 착샷을 우선 활용해 살아 있는 사용감 영상을 만듭니다.",
+        "priority": "model_shot + model_shot > model_shot + single_product > single_product + single_product",
+    },
+    "Balanced / 착샷 + 제품 균형": {
+        "summary": "착샷과 제품컷을 균형 있게 사용해 제품 인지와 사용 맥락을 함께 보여줍니다.",
+        "priority": "model_shot + single_product > model_shot + model_shot > single_product + single_product",
+    },
+    "Product Focus / 제품컷 중심": {
+        "summary": "상품 형태 보존을 최우선으로 하며 단독 제품컷을 우선합니다.",
+        "priority": "single_product + single_product > model_shot + single_product > model_shot + model_shot",
+    },
+}
 VIDEO_TYPE_OPTIONS = {
     "Shopify Product Video": {
         "ratio": "1:1",
@@ -252,6 +266,8 @@ def product_lock_rules(category: str) -> list[str]:
         "Keep the original product design, color, silhouette, texture, material, and proportions faithful to the reference images.",
         "Use subtle, realistic motion only; avoid dramatic transformation or fantasy effects.",
         "Keep the background clean and avoid unrelated accessories or objects.",
+        "If a model appears, keep the body, pose, outfit, and product placement natural and realistic.",
+        "The model is only a context; the product must remain the hero and clearly visible.",
     ]
     if category == "Bag":
         base += [
@@ -270,7 +286,7 @@ def product_lock_rules(category: str) -> list[str]:
     return base
 
 
-def build_scene_card(product: dict, category: str, video_type: str, style: str, ratio: str, duration: str, selected_pair: dict | None, selected_images: list[dict]) -> dict:
+def build_scene_card(product: dict, category: str, video_type: str, video_strategy: str, style: str, ratio: str, duration: str, selected_pair: dict | None, selected_images: list[dict]) -> dict:
     settings = video_type_settings(video_type)
     start_id = selected_pair.get("start_image_id") if selected_pair else (selected_images[0].get("image_id") if selected_images else "")
     end_id = selected_pair.get("end_image_id") if selected_pair else (selected_images[1].get("image_id") if len(selected_images) > 1 else "")
@@ -279,6 +295,8 @@ def build_scene_card(product: dict, category: str, video_type: str, style: str, 
         "product_url": product.get("url", ""),
         "category": category,
         "video_type": video_type,
+        "video_strategy": video_strategy,
+        "strategy_summary": VIDEO_STRATEGY_OPTIONS.get(video_strategy, {}).get("summary", ""),
         "goal": settings.get("goal", ""),
         "style": style,
         "ratio": ratio,
@@ -299,6 +317,8 @@ def scene_card_markdown(scene_card: dict) -> str:
 
 **Product:** {scene_card.get('product_title')}  
 **Video Type:** {scene_card.get('video_type')}  
+**Video Strategy:** {scene_card.get('video_strategy')}  
+**Strategy Summary:** {scene_card.get('strategy_summary')}  
 **Goal:** {scene_card.get('goal')}  
 **Category:** {scene_card.get('category')}  
 **Start Image:** {scene_card.get('start_image_id')}  
@@ -315,7 +335,7 @@ def scene_card_markdown(scene_card: dict) -> str:
 """.strip()
 
 
-def build_vision_messages(product: dict, images_for_analysis: list[dict], category: str, video_type: str) -> list[dict]:
+def build_vision_messages(product: dict, images_for_analysis: list[dict], category: str, video_type: str, video_strategy: str) -> list[dict]:
     settings = video_type_settings(video_type)
     instructions = f"""
 You are an ecommerce creative director and image selector for Kling AI image-to-video generation.
@@ -328,21 +348,25 @@ Product:
 - description: {product.get('description')}
 - category: {category}
 - video_type: {video_type}
+- video_strategy: {video_strategy}
+- strategy_summary: {VIDEO_STRATEGY_OPTIONS.get(video_strategy, {}).get('summary', '')}
+- strategy_pair_priority: {VIDEO_STRATEGY_OPTIONS.get(video_strategy, {}).get('priority', '')}
 - video_goal: {settings.get('goal')}
 - video_tone: {settings.get('tone')}
 
 Selection principles:
-- For Shopify Product Video, prefer clean product-only continuity and low deformation risk.
-- For SNS Short Video, model/lifestyle shots can be considered only when continuity is natural.
-- For Ad Creative Test, prioritize a visually strong start frame while preserving product accuracy.
-- For Brand Mood Clip, allow more atmosphere but avoid changing the product.
-- Prefer clean single-product images.
-- Prefer two images that look like the same product, same color, similar background, and natural visual continuity.
-- Avoid collage images, multi-product group images, heavy model/body-focused images, and images with too many unrelated objects.
-- Avoid product-only image + very different model shot if it creates an unnatural transition.
-- For bags, prefer full product shot -> slightly different angle or slightly closer product shot.
-- For socks, prefer product shot -> similar product/detail shot, or model/fit shots only when both images share a similar pose and background.
+- This version is Lifestyle First by default: for bags, hats, scarves, accessories, and fashion goods, model/lifestyle wearing shots are valuable because they create motion and usage context.
+- If video_strategy is Lifestyle First, prioritize model_shot + model_shot when they show the same product/color and similar background or natural continuity.
+- If video_strategy is Balanced, prioritize model_shot + single_product or single_product + model_shot when the product is clearly recognizable and transition is not too abrupt.
+- If video_strategy is Product Focus, prioritize single_product + single_product, but still allow model_shot when product-only pairs are too static.
+- Prefer model/lifestyle shots where the product is clearly visible and large enough, especially bags worn on shoulder/back or held naturally.
+- Avoid face/body-dominant shots where the product is too small or unclear.
+- Avoid collage images and multi-product group images as primary start/end frames unless no alternative exists.
+- Avoid using the exact same image as both start and end unless explicitly unavoidable; it usually creates static videos.
+- For bags, good lifestyle pairs include back-worn shot -> similar angle wearing shot, or product shot -> wearing shot when same color/product is obvious.
+- For socks, use wearing/fit shots when both images have similar pose/background; otherwise use product/detail pair.
 - The final video must NOT contain text, captions, typography, logos, watermarks, or fake letters.
+- Return practical recommendations even if quality is imperfect, but label risks clearly. Do not stop at “no recommendation” unless all images are unusable.
 
 Return JSON only. Do not include markdown.
 Use this schema:
@@ -365,7 +389,7 @@ Use this schema:
       "pair_score": 0,
       "reason_ko": "Korean reason",
       "cautions_ko": "Korean caution",
-      "suggested_motion": "subtle zoom in / slow pan / gentle camera move"
+      "suggested_motion": "visible but natural camera movement / gentle lifestyle motion / slight parallax"
     }}
   ],
   "overall_notes_ko": "Short Korean advice for the operator"
@@ -380,7 +404,7 @@ Return up to 3 pair recommendations. If no good pair exists, return the least ri
     return [{"role": "user", "content": content}]
 
 
-def analyze_images_and_pairs(product: dict, images_for_analysis: list[dict], category: str, video_type: str, model: str, api_key: str) -> dict:
+def analyze_images_and_pairs(product: dict, images_for_analysis: list[dict], category: str, video_type: str, video_strategy: str, model: str, api_key: str) -> dict:
     if not api_key:
         raise ValueError("OpenAI API Key를 입력해야 GPT Vision 분석을 사용할 수 있습니다.")
     if OpenAI is None:
@@ -389,7 +413,7 @@ def analyze_images_and_pairs(product: dict, images_for_analysis: list[dict], cat
     client = OpenAI(api_key=api_key.strip())
     response = client.chat.completions.create(
         model=model,
-        messages=build_vision_messages(product, images_for_analysis, category, video_type),
+        messages=build_vision_messages(product, images_for_analysis, category, video_type, video_strategy),
         temperature=0.1,
         response_format={"type": "json_object"},
     )
@@ -403,7 +427,7 @@ def get_analysis_for_image(analysis: dict, image_id: str) -> dict:
     return {}
 
 
-def build_prompt_request(product: dict, selected_images: list[dict], category: str, video_type: str, style: str, ratio: str, duration: str, selected_pair: dict | None, image_analysis: dict | None, scene_card: dict | None) -> str:
+def build_prompt_request(product: dict, selected_images: list[dict], category: str, video_type: str, video_strategy: str, style: str, ratio: str, duration: str, selected_pair: dict | None, image_analysis: dict | None, scene_card: dict | None) -> str:
     image_notes = []
     for img in selected_images:
         analysis_item = get_analysis_for_image(image_analysis or {}, img.get("image_id"))
@@ -438,6 +462,8 @@ Product information:
 - Product description: {product.get('description')}
 - Category: {category}
 - Video type: {video_type}
+- Video strategy: {video_strategy}
+- Strategy summary: {VIDEO_STRATEGY_OPTIONS.get(video_strategy, {}).get('summary', '')}
 - Video goal: {video_type_settings(video_type).get('goal')}
 - Desired style: {style}
 - Desired aspect ratio: {ratio}
@@ -457,7 +483,7 @@ Scene Card:
 Return the result in the following exact structure:
 
 ## Kling Main Prompt
-Write one polished English prompt that can be copied directly into Kling. Mention start frame and end frame naturally. Keep motion subtle.
+Write one polished English prompt that can be copied directly into Kling. Mention start frame and end frame naturally. If the selected images include model/lifestyle shots, emphasize realistic lifestyle movement, natural body motion, slight parallax, and keeping the product as the hero. Avoid a static image feel while preserving the product.
 
 ## Negative Prompt
 Write comma-separated negative keywords and phrases.
@@ -496,15 +522,15 @@ def generate_prompt_with_openai(prompt_request: str, model: str, api_key: str) -
 
 def fallback_prompt() -> str:
     return """## Kling Main Prompt
-Create a clean and elegant ecommerce product video using the selected start and end product images as reference. Keep the product design, color, silhouette, texture, material, pattern, and all details faithful to the reference images. Use subtle camera movement, soft natural lighting, and a simple minimal background. Focus on the product's shape, texture, and everyday appeal. The video should feel like a friendly Japanese online store product presentation. No text, no captions, no typography, no letters, no logos, no watermarks, no subtitles.
+Create a natural ecommerce lifestyle product video using the selected start and end images as reference. Keep the product design, color, silhouette, texture, material, pattern, and all details faithful to the reference images. If a model appears, keep the pose, outfit, body shape, and product placement realistic and natural. Use visible but gentle camera movement, slight parallax, and subtle lifestyle motion so the result does not feel like a static image. Keep the product as the hero and clearly visible. No text, no captions, no typography, no letters, no logos, no watermarks, no subtitles.
 
 ## Negative Prompt
-wrong product shape, changed color, changed pattern, distorted product, deformed material, extra objects, unrelated accessories, messy background, blurry details, excessive motion, text, letters, captions, typography, logo, watermark, subtitle
+wrong product shape, changed color, changed pattern, distorted product, deformed material, unnatural body pose, deformed hands, unrealistic clothing, extra objects, unrelated accessories, messy background, blurry details, excessive motion, static frame, no motion, text, letters, captions, typography, logo, watermark, subtitle
 
 ## Recommended Settings
 - Duration: 5 seconds
 - Aspect ratio: 1:1
-- Motion: subtle camera movement
+- Motion: visible but gentle camera movement / slight parallax
 - Style: clean ecommerce product video
 
 ## Korean Notes
@@ -602,7 +628,7 @@ def create_zip(product_title: str, selected_images: list[dict], prompt_text: str
 def append_log(row: dict) -> None:
     exists = os.path.exists(LOG_FILE)
     fieldnames = [
-        "created_at", "product_url", "product_title", "category", "video_type", "style", "ratio", "duration",
+        "created_at", "product_url", "product_title", "category", "video_type", "video_strategy", "style", "ratio", "duration",
         "selected_image_ids", "selected_pair_score", "model", "prompt_hash", "video_created", "shopify_uploaded", "memo",
     ]
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
@@ -673,7 +699,7 @@ def selected_images_from_pair(images: list[dict], pair: dict | None) -> list[dic
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🧦", layout="wide")
     st.title("🧦 SocksLover Mini ShotFlow")
-    st.caption("상품 이미지·프롬프트·Scene Card·Take Log를 관리하는 SocksLover용 Mini ShotFlow MVP v4.4")
+    st.caption("모델 착샷 우선 Pair 추천과 Kling 프롬프트를 관리하는 SocksLover용 Mini ShotFlow MVP v4.5")
 
     with st.sidebar:
         st.header("설정")
@@ -691,9 +717,9 @@ def main():
         st.write("✅ 이미지 자동 추출")
         st.write("✅ 이미지 카드 표시")
         st.write("✅ GPT Vision 이미지 유형/적합도 분석")
-        st.write("✅ Pair 추천 자동화")
+        st.write("✅ Lifestyle First Pair 추천 자동화")
         st.write("✅ Scene Card 생성")
-        st.write("✅ Product Lock 자동 삽입")
+        st.write("✅ Product Lock / Model Lock 자동 삽입")
         st.write("✅ Kling 프롬프트 생성")
         st.write("✅ Take Log / 재생성 프롬프트")
         st.write("❌ Kling API 연동 없음")
@@ -738,6 +764,8 @@ def main():
 
     st.subheader("2. 영상 용도 / Product Lock")
     video_type = st.selectbox("영상 용도", list(VIDEO_TYPE_OPTIONS.keys()), index=0)
+    video_strategy = st.selectbox("추천 전략", list(VIDEO_STRATEGY_OPTIONS.keys()), index=0, help="현재 상품 이미지 자산이 모델 착샷 중심이면 Lifestyle First를 추천합니다.")
+    st.info(VIDEO_STRATEGY_OPTIONS.get(video_strategy, {}).get("summary", ""))
     vset = video_type_settings(video_type)
     vc1, vc2, vc3 = st.columns(3)
     vc1.metric("기본 비율", vset.get("ratio"))
@@ -767,7 +795,7 @@ def main():
             else:
                 with st.spinner("GPT Vision이 이미지를 분석하고 추천 조합을 만드는 중입니다..."):
                     try:
-                        analysis = analyze_images_and_pairs(product, images_for_analysis, category, video_type, model, api_key)
+                        analysis = analyze_images_and_pairs(product, images_for_analysis, category, video_type, video_strategy, model, api_key)
                         st.session_state["vision_analysis"] = analysis
                         st.success("분석 완료. 아래 추천 조합을 확인해주세요.")
                         st.rerun()
@@ -834,7 +862,7 @@ def main():
 
     scene_card = None
     if selected_images and len(selected_images) >= 2:
-        scene_card = build_scene_card(product, category, video_type, style, ratio, duration, selected_pair or st.session_state.get("selected_pair", {}), selected_images)
+        scene_card = build_scene_card(product, category, video_type, video_strategy, style, ratio, duration, selected_pair or st.session_state.get("selected_pair", {}), selected_images)
         st.markdown(scene_card_markdown(scene_card))
         st.session_state["scene_card"] = scene_card
 
@@ -845,14 +873,14 @@ def main():
             st.error("먼저 추천 Pair를 선택해주세요. Kling 시작/끝 프레임에는 2장이 필요합니다.")
         else:
             with st.spinner("GPT가 Kling용 프롬프트를 생성하는 중입니다..."):
-                prompt_request = build_prompt_request(product, selected_images, category, video_type, style, ratio, duration, selected_pair, analysis, scene_card)
+                prompt_request = build_prompt_request(product, selected_images, category, video_type, video_strategy, style, ratio, duration, selected_pair, analysis, scene_card)
                 try:
                     result = generate_prompt_with_openai(prompt_request, model, api_key)
                 except Exception as e:
                     result = f"프롬프트 생성 실패: {e}\n\n" + fallback_prompt()
                 st.session_state["generated_prompt"] = result
                 st.session_state["selected_images"] = selected_images
-                st.session_state["prompt_meta"] = {"category": category, "video_type": video_type, "style": style, "ratio": ratio, "duration": duration, "model": model}
+                st.session_state["prompt_meta"] = {"category": category, "video_type": video_type, "video_strategy": video_strategy, "style": style, "ratio": ratio, "duration": duration, "model": model}
 
     generated = st.session_state.get("generated_prompt")
     if generated:
@@ -871,6 +899,7 @@ def main():
                     "product_title": product.get("title"),
                     "category": meta.get("category"),
                     "video_type": meta.get("video_type"),
+                    "video_strategy": meta.get("video_strategy"),
                     "style": meta.get("style"),
                     "ratio": meta.get("ratio"),
                     "duration": meta.get("duration"),
@@ -953,6 +982,7 @@ def main():
 - 생성된 Main Prompt / Negative Prompt를 Kling에 붙여넣습니다.
 - 영상 안에 텍스트, 로고, 가짜 문자가 생기면 재생성합니다.
 - 상품 디자인, 색상, 패턴, 스트랩, 소재감이 실제 상품과 다르면 사용하지 않습니다.
+- 모델 착샷 기반 영상은 제품이 주인공으로 보이는지, 착용 맥락이 자연스러운지 확인합니다.
 - Kling 결과를 Take Log에 기록하고, 채택 가능한 영상만 Shopify 상품 미디어에 수동 등록합니다.
             """.strip()
         )
