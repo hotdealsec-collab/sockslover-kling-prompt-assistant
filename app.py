@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
     OpenAI = None
 
 APP_TITLE = "SocksLover Mini ShotFlow"
-APP_VERSION = "MVP v4.5 Lifestyle First"
+APP_VERSION = "MVP v4.7 Image Filter Guard"
 DEFAULT_MODEL = "gpt-4.1-mini"
 OUTPUT_DIR = "outputs"
 ZIP_DIR = os.path.join(OUTPUT_DIR, "zips")
@@ -362,7 +362,9 @@ Selection principles:
 - Prefer model/lifestyle shots where the product is clearly visible and large enough, especially bags worn on shoulder/back or held naturally.
 - Avoid face/body-dominant shots where the product is too small or unclear.
 - Avoid collage images and multi-product group images as primary start/end frames unless no alternative exists.
-- Avoid using the exact same image as both start and end unless explicitly unavoidable; it usually creates static videos.
+- First judge whether each image is actually relevant to the current product. If the image appears to be a default/common/recommended-product image or a different category item, mark relevance_score low and is_global_default true when appropriate.
+- For a bag product, socks-only images are unrelated. For a socks product, bag-only images are unrelated. Unrelated images should be not_recommended and must not be used in pair recommendations.
+- NEVER use the exact same image as both start and end. Same-image pairs create static videos and are invalid.
 - For bags, good lifestyle pairs include back-worn shot -> similar angle wearing shot, or product shot -> wearing shot when same color/product is obvious.
 - For socks, use wearing/fit shots when both images have similar pose/background; otherwise use product/detail pair.
 - The final video must NOT contain text, captions, typography, logos, watermarks, or fake letters.
@@ -376,6 +378,8 @@ Use this schema:
       "image_id": "1",
       "image_type": "single_product | model_shot | multi_product | collage | detail_shot | lifestyle | unclear",
       "suitability_score": 0,
+      "relevance_score": 0,
+      "is_global_default": false,
       "recommended_role": "start_frame | end_frame | either | not_recommended",
       "short_reason_ko": "Korean short reason",
       "cautions_ko": "Korean caution or empty string"
@@ -394,7 +398,7 @@ Use this schema:
   ],
   "overall_notes_ko": "Short Korean advice for the operator"
 }}
-Return up to 3 pair recommendations. If no good pair exists, return the least risky pair and explain the caution.
+Return up to 5 pair recommendations. Do not return any pair where start_image_id and end_image_id are the same. If only weak pairs exist, prefer model_shot/lifestyle shots over multi_product images and explain the caution.
 """.strip()
 
     content = [{"type": "text", "text": instructions}]
@@ -651,6 +655,35 @@ def append_take_log(row: dict) -> None:
         writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 
+
+def default_analysis_start_index(product: dict) -> int:
+    """Suggest the first image number to analyze.
+
+    SocksLover product pages can include default/common images before the real body images.
+    The operator can always override this in the UI.
+    """
+    total = len(product.get("images", []))
+    host = urlparse(product.get("url", "")).netloc.lower()
+    if "sockslover" in host and total >= 22:
+        return 22
+    return 1
+
+
+def get_analysis_candidates(product: dict, start_number: int, max_count: int) -> list[dict]:
+    images = product.get("images", [])
+    start_index = max(0, int(start_number) - 1)
+    return images[start_index:start_index + max_count]
+
+
+def candidate_range_label(product: dict, start_number: int, max_count: int) -> str:
+    total = len(product.get("images", []))
+    if total == 0:
+        return "분석 대상 이미지 없음"
+    start = min(max(1, int(start_number)), total)
+    end = min(total, start + int(max_count) - 1)
+    return f"사용 {start} ~ 사용 {end} / 전체 {total}장"
+
+
 def render_image_cards(images: list[dict], analysis: dict | None = None) -> None:
     if not images:
         st.warning("추출된 이미지가 없습니다. 상품 페이지 HTML 구조를 확인해주세요.")
@@ -670,7 +703,14 @@ def render_image_cards(images: list[dict], analysis: dict | None = None) -> None
                 if a:
                     score = int(a.get("suitability_score") or 0)
                     img_type = a.get("image_type", "unclear")
-                    st.caption(f"유형: {IMAGE_TYPE_LABELS.get(img_type, img_type)} / 적합도: {score}점")
+                    relevance = a.get("relevance_score")
+                    global_flag = a.get("is_global_default")
+                    extra = ""
+                    if relevance is not None:
+                        extra += f" / 관련도: {relevance}점"
+                    if global_flag:
+                        extra += " / 공통이미지 의심"
+                    st.caption(f"유형: {IMAGE_TYPE_LABELS.get(img_type, img_type)} / 적합도: {score}점{extra}")
                     st.caption(f"역할: {a.get('recommended_role', '-')}")
                     st.caption(a.get("short_reason_ko", ""))
                     if a.get("cautions_ko"):
@@ -678,6 +718,150 @@ def render_image_cards(images: list[dict], analysis: dict | None = None) -> None
                 else:
                     st.caption(f"{img.get('source', '')} / {normalize_space(img.get('alt',''))[:45]}")
 
+
+
+def image_type_weight(image_type: str, video_strategy: str) -> int:
+    image_type = (image_type or "unclear").strip()
+    if video_strategy.startswith("Lifestyle First"):
+        weights = {
+            "model_shot": 45,
+            "lifestyle": 42,
+            "single_product": 24,
+            "detail_shot": 8,
+            "multi_product": -25,
+            "collage": -35,
+            "unclear": -5,
+        }
+    elif video_strategy.startswith("Balanced"):
+        weights = {
+            "model_shot": 36,
+            "lifestyle": 34,
+            "single_product": 32,
+            "detail_shot": 10,
+            "multi_product": -22,
+            "collage": -35,
+            "unclear": -5,
+        }
+    else:
+        weights = {
+            "single_product": 42,
+            "model_shot": 26,
+            "lifestyle": 24,
+            "detail_shot": 12,
+            "multi_product": -25,
+            "collage": -35,
+            "unclear": -5,
+        }
+    return weights.get(image_type, -5)
+
+
+def combo_bonus(start_type: str, end_type: str, video_strategy: str) -> int:
+    types = {start_type, end_type}
+    if video_strategy.startswith("Lifestyle First"):
+        if start_type in ["model_shot", "lifestyle"] and end_type in ["model_shot", "lifestyle"]:
+            return 34
+        if (start_type in ["model_shot", "lifestyle"] and end_type == "single_product") or (end_type in ["model_shot", "lifestyle"] and start_type == "single_product"):
+            return 24
+        if types == {"single_product"}:
+            return 6
+    elif video_strategy.startswith("Balanced"):
+        if (start_type in ["model_shot", "lifestyle"] and end_type == "single_product") or (end_type in ["model_shot", "lifestyle"] and start_type == "single_product"):
+            return 30
+        if start_type in ["model_shot", "lifestyle"] and end_type in ["model_shot", "lifestyle"]:
+            return 24
+        if types == {"single_product"}:
+            return 16
+    else:
+        if types == {"single_product"}:
+            return 30
+        if (start_type in ["model_shot", "lifestyle"] and end_type == "single_product") or (end_type in ["model_shot", "lifestyle"] and start_type == "single_product"):
+            return 16
+    return 0
+
+
+def build_heuristic_pairs(images: list[dict], analysis: dict, video_strategy: str, limit: int = 6) -> list[dict]:
+    image_analysis = {str(item.get("image_id")): item for item in analysis.get("images", [])}
+    candidates = []
+    valid_ids = [str(img.get("image_id")) for img in images]
+    for start_id in valid_ids:
+        for end_id in valid_ids:
+            if start_id == end_id:
+                continue
+            s = image_analysis.get(start_id, {})
+            e = image_analysis.get(end_id, {})
+            stype = s.get("image_type", "unclear")
+            etype = e.get("image_type", "unclear")
+            # Exclude images that Vision judged unrelated/default. This prevents common/default images from dominating recommendations.
+            if s.get("is_global_default") or e.get("is_global_default"):
+                continue
+            if int(s.get("relevance_score") or 100) < 30 or int(e.get("relevance_score") or 100) < 30:
+                continue
+            # Multi-product/collage can be used only as a last resort and should rank low.
+            base = (int(s.get("suitability_score") or 0) + int(e.get("suitability_score") or 0)) / 2
+            score = base + image_type_weight(stype, video_strategy) + image_type_weight(etype, video_strategy) + combo_bonus(stype, etype, video_strategy)
+            if stype in ["multi_product", "collage"] and etype in ["multi_product", "collage"]:
+                score -= 45
+            if stype in ["multi_product", "collage"] or etype in ["multi_product", "collage"]:
+                score -= 20
+            candidates.append({
+                "rank": 0,
+                "start_image_id": start_id,
+                "end_image_id": end_id,
+                "pair_score": max(0, min(100, int(round(score / 2)))),
+                "reason_ko": "자동 보정 추천: 분석 결과를 기준으로 동일 이미지 조합을 제외하고, 현재 전략에 맞는 이미지 유형 조합을 우선했습니다.",
+                "cautions_ko": "GPT 추천 보정 결과입니다. 실제 상품/색상이 같은지 최종 확인해주세요.",
+                "suggested_motion": "visible but natural camera movement / gentle lifestyle motion / slight parallax",
+                "source": "heuristic_guard",
+            })
+    candidates.sort(key=lambda x: x.get("pair_score", 0), reverse=True)
+    return candidates[:limit]
+
+
+def normalize_pair_recommendations(product_images: list[dict], analysis: dict, video_strategy: str) -> dict:
+    """Post-process GPT pair recommendations so the UI never recommends static same-image pairs.
+
+    GPT can occasionally return start=end when image assets are weak. For Kling, that is almost always a bad recommendation.
+    This guard removes same-image pairs, de-duplicates pairs, and fills missing slots with heuristic lifestyle-first pairs.
+    """
+    if not analysis:
+        return analysis
+    valid_ids = {str(img.get("image_id")) for img in product_images}
+    cleaned = []
+    seen = set()
+    for pair in analysis.get("pair_recommendations", []) or []:
+        start_id = str(pair.get("start_image_id", "")).strip()
+        end_id = str(pair.get("end_image_id", "")).strip()
+        if not start_id or not end_id or start_id not in valid_ids or end_id not in valid_ids:
+            continue
+        if start_id == end_id:
+            continue
+        key = (start_id, end_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        pair["start_image_id"] = start_id
+        pair["end_image_id"] = end_id
+        pair["source"] = pair.get("source", "gpt_vision")
+        cleaned.append(pair)
+
+    heuristic_pairs = build_heuristic_pairs(product_images, analysis, video_strategy, limit=8)
+    for hp in heuristic_pairs:
+        key = (str(hp.get("start_image_id")), str(hp.get("end_image_id")))
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(hp)
+
+    cleaned.sort(key=lambda x: int(x.get("pair_score") or 0), reverse=True)
+    cleaned = cleaned[:3]
+    for idx, pair in enumerate(cleaned, start=1):
+        pair["rank"] = idx
+
+    analysis["pair_recommendations"] = cleaned
+    if not cleaned:
+        analysis["overall_notes_ko"] = (analysis.get("overall_notes_ko", "") + " 추천 가능한 서로 다른 이미지 Pair가 없습니다. 이미지가 최소 2장 필요합니다.").strip()
+    else:
+        analysis["overall_notes_ko"] = (analysis.get("overall_notes_ko", "") + " 동일 이미지 Start/End 조합은 자동으로 제외했습니다.").strip()
+    return analysis
 
 def pair_label(pair: dict) -> str:
     return f"추천 {pair.get('rank')} | 시작 {pair.get('start_image_id')} → 끝 {pair.get('end_image_id')} | {pair.get('pair_score')}점"
@@ -699,7 +883,7 @@ def selected_images_from_pair(images: list[dict], pair: dict | None) -> list[dic
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🧦", layout="wide")
     st.title("🧦 SocksLover Mini ShotFlow")
-    st.caption("모델 착샷 우선 Pair 추천과 Kling 프롬프트를 관리하는 SocksLover용 Mini ShotFlow MVP v4.5")
+    st.caption("공통/디폴트 이미지를 제외하고 실제 상품 이미지 중심으로 Pair를 추천하는 Mini ShotFlow MVP v4.7")
 
     with st.sidebar:
         st.header("설정")
@@ -710,14 +894,16 @@ def main():
             placeholder="sk-...",
             help="이 키는 현재 Streamlit 세션에서만 사용되며, 로그/ZIP/CSV에 저장되지 않습니다.",
         )
-        max_vision_images = st.slider("Vision 분석 최대 이미지 수", min_value=4, max_value=20, value=12, step=1)
-        st.caption("이미지가 많을수록 Vision 분석 비용과 시간이 늘어납니다. 처음에는 8~12장 추천.")
+        max_vision_images = st.slider("Vision 분석 최대 이미지 수", min_value=4, max_value=30, value=12, step=1)
+        st.caption("이미지가 많을수록 Vision 분석 비용과 시간이 늘어납니다. 실제 상품 이미지 범위만 선택하는 것을 추천합니다.")
         st.divider()
         st.markdown("### MVP 범위")
         st.write("✅ 이미지 자동 추출")
         st.write("✅ 이미지 카드 표시")
         st.write("✅ GPT Vision 이미지 유형/적합도 분석")
         st.write("✅ Lifestyle First Pair 추천 자동화")
+        st.write("✅ 앞부분 공통/디폴트 이미지 제외")
+        st.write("✅ 분석 시작 이미지 번호 수동 지정")
         st.write("✅ Scene Card 생성")
         st.write("✅ Product Lock / Model Lock 자동 삽입")
         st.write("✅ Kling 프롬프트 생성")
@@ -737,6 +923,7 @@ def main():
                     html = fetch_html(product_url.strip())
                     product = extract_shopify_product_data(product_url.strip(), html)
                     st.session_state["product"] = product
+                    st.session_state["analysis_start_number"] = default_analysis_start_index(product)
                     for k in ["vision_analysis", "generated_prompt", "selected_pair", "selected_images", "prompt_meta", "scene_card", "regen_prompt"]:
                         st.session_state.pop(k, None)
                 except Exception as e:
@@ -777,9 +964,34 @@ def main():
         for rule in product_lock_rules(category):
             st.write(f"- {rule}")
 
-    st.subheader("3. 이미지 카드")
-    st.caption("GPT Vision 분석 전에는 단순 이미지 목록만 표시됩니다. 분석 후에는 유형/적합도/추천 사유가 카드에 표시됩니다.")
-    render_image_cards(product.get("images", []), st.session_state.get("vision_analysis"))
+    st.subheader("3. 이미지 필터 / 분석 대상 선택")
+    all_images = product.get("images", [])
+    default_start = default_analysis_start_index(product)
+    if "analysis_start_number" not in st.session_state:
+        st.session_state["analysis_start_number"] = default_start
+    f1, f2, f3 = st.columns([1, 1, 2])
+    with f1:
+        analysis_start_number = st.number_input(
+            "분석 시작 이미지 번호",
+            min_value=1,
+            max_value=max(1, len(all_images)),
+            value=min(st.session_state.get("analysis_start_number", default_start), max(1, len(all_images))),
+            step=1,
+            help="앞부분에 공통/디폴트/추천상품 이미지가 섞이면 실제 상품 이미지가 시작되는 번호로 조정하세요. SocksLover는 22번 전후부터 실제 Body 이미지가 나오는 경우가 있습니다.",
+        )
+        st.session_state["analysis_start_number"] = analysis_start_number
+    with f2:
+        st.metric("분석 대상", candidate_range_label(product, analysis_start_number, max_vision_images))
+    with f3:
+        st.info("앞부분 이미지가 양말/가방 등 다른 상품으로 섞여 있으면, 분석 시작 번호를 실제 상품 이미지가 시작되는 번호로 바꾼 뒤 Vision 분석을 실행하세요.")
+
+    analysis_candidates = get_analysis_candidates(product, analysis_start_number, max_vision_images)
+    st.caption(f"전체 {len(all_images)}장 중 GPT Vision 분석 대상 {len(analysis_candidates)}장만 아래에 표시합니다.")
+    render_image_cards(analysis_candidates, st.session_state.get("vision_analysis"))
+
+    with st.expander("전체 추출 이미지 보기", expanded=False):
+        st.caption("필요하면 실제 상품 이미지가 몇 번부터 시작하는지 확인한 뒤 위의 분석 시작 번호를 조정하세요.")
+        render_image_cards(all_images, None)
 
     st.subheader("4. GPT Vision 이미지 분석 & Pair 추천")
     st.caption("선택한 영상 용도 기준으로 Kling에서 시작/끝 프레임으로 쓰기 좋은 2장 조합을 추천합니다.")
@@ -789,13 +1001,14 @@ def main():
         if not api_key.strip():
             st.error("OpenAI API Key를 입력해주세요.")
         else:
-            images_for_analysis = product.get("images", [])[:max_vision_images]
+            images_for_analysis = analysis_candidates
             if len(images_for_analysis) < 2:
                 st.error("Pair 추천에는 최소 2장의 이미지가 필요합니다.")
             else:
                 with st.spinner("GPT Vision이 이미지를 분석하고 추천 조합을 만드는 중입니다..."):
                     try:
                         analysis = analyze_images_and_pairs(product, images_for_analysis, category, video_type, video_strategy, model, api_key)
+                        analysis = normalize_pair_recommendations(images_for_analysis, analysis, video_strategy)
                         st.session_state["vision_analysis"] = analysis
                         st.success("분석 완료. 아래 추천 조합을 확인해주세요.")
                         st.rerun()
@@ -808,6 +1021,8 @@ def main():
 
     if analysis:
         st.subheader("5. 추천 Pair TOP 3")
+        if analysis.get("overall_notes_ko"):
+            st.info(analysis.get("overall_notes_ko"))
         pairs = analysis.get("pair_recommendations", [])
         if pairs:
             for pair in pairs:

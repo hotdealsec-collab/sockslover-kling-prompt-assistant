@@ -1,6 +1,6 @@
 # SocksLover Mini ShotFlow
 
-MVP v4.5 Lifestyle First for SocksLover product video production.
+MVP v4.7 Image Filter Guard for SocksLover product video production.
 
 This Streamlit app helps small Shopify stores create AI-video-ready assets without automating Kling or Shopify uploads.
 
@@ -8,7 +8,8 @@ This Streamlit app helps small Shopify stores create AI-video-ready assets witho
 
 - Enter a Shopify product URL
 - Extract product images from the product page HTML
-- Display product image cards
+- Exclude or skip common/default images before GPT Vision analysis
+- Display only the selected analysis target image cards
 - Analyze images with GPT Vision
 - Recommend the best start/end image pair for Kling using a Lifestyle First strategy
 - Generate a Scene Card
@@ -42,16 +43,39 @@ The key is used only during the current Streamlit session and is not saved to CS
 
 1. Open the app
 2. Enter a SocksLover Shopify product URL
-3. Select the product category, video type, and recommendation strategy
-4. Run GPT Vision analysis
-5. Review the recommended image pair, prioritizing model/lifestyle shots when appropriate
-6. Generate the Scene Card and Kling prompt
-7. Download the ZIP
-8. Upload the two selected images to Kling manually
-9. Paste the generated prompt into Kling
-10. Review the output video
-11. Record the take result in the Take Log
-12. Upload only the accepted video to Shopify manually
+3. Check the extracted image count
+4. Adjust **분석 시작 이미지 번호** if the first images are default/common/recommended-product images
+5. Select the product category, video type, and recommendation strategy
+6. Run GPT Vision analysis
+7. Review the recommended image pair, prioritizing model/lifestyle shots when appropriate
+8. Generate the Scene Card and Kling prompt
+9. Download the ZIP
+10. Upload the two selected images to Kling manually
+11. Paste the generated prompt into Kling
+12. Review the output video
+13. Record the take result in the Take Log
+14. Upload only the accepted video to Shopify manually
+
+## Image Filter Guard
+
+Some SocksLover product pages can return many images from the whole page, including default images, recommended products, or unrelated category images before the actual product body images.
+
+v4.7 adds:
+
+- **분석 시작 이미지 번호** option
+- analysis target range preview
+- full extracted image preview in an expander
+- GPT Vision fields for product relevance and default/common-image suspicion
+- heuristic pair guard that ignores images marked as low relevance or common/default
+
+Example:
+
+```text
+Total extracted images: 40
+Actual product images start around: use 22
+Set 분석 시작 이미지 번호 = 22
+Vision analyzes use 22 ~ use 33 only
+```
 
 ## Video types and strategy
 
@@ -106,3 +130,16 @@ logs/
 ```
 
 Do not upload a real `.env` file or API keys.
+
+## v4.7 Image Filter Guard 업데이트
+
+이번 버전은 실제 상품 이미지가 뒤쪽에 있는데 앞쪽 공통/디폴트 이미지가 Vision 분석 대상이 되는 문제를 줄이기 위한 업데이트입니다.
+
+- 분석 시작 이미지 번호 수동 지정
+- SocksLover에서 이미지가 22장 이상이면 기본 분석 시작 번호를 22로 제안
+- 전체 추출 이미지와 분석 대상 이미지를 분리 표시
+- GPT Vision 결과에 `relevance_score`, `is_global_default` 필드 추가
+- heuristic pair 추천에서 공통/디폴트/저관련 이미지 제외
+- 동일 이미지 Start/End pair 자동 제외 유지
+
+목적은 “상품과 무관한 이미지가 추천 Pair에 들어가는 문제를 줄이고, 실제 상품 상세 이미지/모델 착샷 구간만 분석하도록 만드는 것”입니다.
