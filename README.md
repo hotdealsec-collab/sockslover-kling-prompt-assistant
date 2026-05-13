@@ -1,100 +1,101 @@
-# SocksLover Kling Prompt Assistant
+# SocksLover Mini ShotFlow
 
-Shopify 상품 URL에서 상품 이미지를 자동 추출하고, GPT Vision으로 Kling AI용 시작/끝 이미지 pair를 추천한 뒤, Kling에 복사할 영상 생성 프롬프트를 만드는 Streamlit MVP입니다.
+MVP v4.4 for SocksLover product video production.
 
-## MVP v4.3 기능
+This Streamlit app helps small Shopify stores create AI-video-ready assets without automating Kling or Shopify uploads.
 
-- Shopify 상품 URL 입력
-- 상품명 / 설명 / 이미지 자동 추출
-- 이미지 카드 표시
-- GPT Vision으로 이미지 유형 / Kling 적합도 분석
-- Kling 시작 프레임 / 끝 프레임용 이미지 pair TOP 3 추천
-- 추천 사유와 주의사항 표시
-- 선택된 pair 기반 Kling 프롬프트 자동 생성
-- 영상 내 텍스트 / 자막 / 로고 금지 조건 자동 반영
-- 선택 이미지 + 프롬프트 ZIP 다운로드
-- 작업 로그 CSV 저장
+## What it does
 
-## 제외 범위
+- Enter a Shopify product URL
+- Extract product images from the product page HTML
+- Display product image cards
+- Analyze images with GPT Vision
+- Recommend the best start/end image pair for Kling
+- Generate a Scene Card
+- Insert Product Lock rules automatically
+- Generate a Kling-ready prompt with no text overlay
+- Save generation logs
+- Save Kling take/result logs
+- Generate regeneration instructions when Kling output fails
+- Download selected images, prompt, pair analysis, and Scene Card as a ZIP
 
-- Kling API 자동 연동 없음
-- Runway / Pika API 자동 연동 없음
-- Shopify 상품 미디어 자동 업로드 없음
-- 대표 미디어 자동 교체 없음
+## What it does not do
 
-이 MVP는 사람이 Kling에서 직접 영상을 생성하고, Shopify에 수동으로 등록하는 반자동 운영 도구입니다.
+- It does not call the Kling API
+- It does not upload videos to Shopify automatically
+- It does not store your OpenAI API key
 
-## 설치
+## Install
 
 ```bash
 pip install -r requirements.txt
-```
-
-## 실행
-
-```bash
 streamlit run app.py
 ```
 
-## OpenAI API Key 사용 방식
+## OpenAI API Key
 
-OpenAI API Key는 `.env`에 저장하지 않습니다.
-Streamlit 실행 후 왼쪽 사이드바의 `OpenAI API Key` 입력창에 사용할 때만 입력합니다.
+Enter your OpenAI API key in the Streamlit sidebar when using the app.
 
-API Key는 다음 위치에 저장되지 않습니다.
+The key is used only during the current Streamlit session and is not saved to CSV, ZIP, or logs.
 
-- GitHub repository
-- `.env`
-- ZIP 파일
-- CSV 로그
+## Recommended workflow
 
-## 기본 사용 흐름
+1. Open the app
+2. Enter a SocksLover Shopify product URL
+3. Select the product category and video type
+4. Run GPT Vision analysis
+5. Review the recommended image pair
+6. Generate the Scene Card and Kling prompt
+7. Download the ZIP
+8. Upload the two selected images to Kling manually
+9. Paste the generated prompt into Kling
+10. Review the output video
+11. Record the take result in the Take Log
+12. Upload only the accepted video to Shopify manually
 
-1. Streamlit 실행
-2. 왼쪽 사이드바에 OpenAI API Key 입력
-3. Shopify 상품 URL 입력
-4. `상품 정보 가져오기` 클릭
-5. 이미지 카드 확인
-6. `GPT Vision으로 분석하고 Pair 추천` 클릭
-7. 추천 Pair TOP 3 중 하나 선택
-8. 영상 스타일 / 비율 / 길이 선택
-9. `선택 Pair 기반 Kling용 프롬프트 생성` 클릭
-10. 생성된 프롬프트와 선택 이미지 2장을 Kling에 수동 입력
-11. 영상 검수 후 Shopify에 수동 등록
+## Video types
 
-## 추천 운영 원칙
+- Shopify Product Video: product page, 1:1, 5 seconds
+- SNS Short Video: Instagram/X/Pinterest, 4:5, 10 seconds
+- Ad Creative Test: ad creative testing, 1:1, 5 seconds
+- Brand Mood Clip: category or brand mood, 16:9, 10 seconds
 
-Kling에서 시작/끝 프레임으로 사용할 이미지는 2장만 선택하는 것을 권장합니다.
+## Product Lock
 
-좋은 조합:
+The app automatically adds Product Lock rules to reduce AI deformation.
 
-- 단일 상품 전체컷 → 같은 상품의 약간 다른 각도
-- 단일 상품 전체컷 → 같은 상품의 약간 가까운 컷
-- 같은 배경/같은 스타일의 착용컷 2장
+Examples:
 
-피해야 할 조합:
+- Do not change product color, shape, material, texture, or proportions.
+- Do not add text, captions, typography, logos, watermarks, or fake letters.
+- For bags: preserve strap, handle, buckle, zipper, stitching, and structure.
+- For socks: preserve pattern, color, length, fabric texture, and ribbing.
 
-- 여러 상품이 함께 있는 이미지
-- 콜라주 이미지
-- 제품 단독컷 → 완전히 다른 모델 착샷
-- 배경이 크게 다른 이미지 조합
-- 상품 색상/형태가 다른 이미지 조합
+## Logs
 
-## 폴더 구조
+The app creates two CSV logs:
 
 ```text
-sockslover-kling-prompt-assistant/
-├── app.py
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── README.md
-├── outputs/
-│   └── zips/
-└── logs/
+logs/generation_log.csv
+logs/take_log.csv
 ```
 
-## GitHub 업로드 시 주의
+These logs help manage prompt generation and Kling output quality over multiple products.
 
-`.env` 파일이나 실제 API Key는 절대 업로드하지 마세요.
-`.env.example`만 업로드하면 됩니다.
+## GitHub upload notes
+
+Upload the extracted folder contents to GitHub, not the ZIP file itself.
+
+Recommended files/folders:
+
+```text
+app.py
+requirements.txt
+README.md
+.env.example
+.gitignore
+outputs/
+logs/
+```
+
+Do not upload a real `.env` file or API keys.

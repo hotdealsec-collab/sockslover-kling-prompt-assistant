@@ -6,7 +6,6 @@ import json
 import zipfile
 import hashlib
 from datetime import datetime
-from itertools import combinations
 from urllib.parse import urljoin, urlparse
 
 import pandas as pd
@@ -19,21 +18,62 @@ try:
 except Exception:  # pragma: no cover
     OpenAI = None
 
-APP_TITLE = "SocksLover Kling Prompt Assistant"
-APP_VERSION = "MVP v4.3"
+APP_TITLE = "SocksLover Mini ShotFlow"
+APP_VERSION = "MVP v4.4"
 DEFAULT_MODEL = "gpt-4.1-mini"
 OUTPUT_DIR = "outputs"
 ZIP_DIR = os.path.join(OUTPUT_DIR, "zips")
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "generation_log.csv")
+TAKE_LOG_FILE = os.path.join(LOG_DIR, "take_log.csv")
 
 os.makedirs(ZIP_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 CATEGORY_OPTIONS = ["Bag", "Socks", "Hat / Scarf", "Accessory", "Other"]
 STYLE_OPTIONS = ["Clean ecommerce", "Cute lifestyle", "Premium minimal", "Daily outing"]
+VIDEO_TYPE_OPTIONS = {
+    "Shopify Product Video": {
+        "ratio": "1:1",
+        "duration": "5 seconds",
+        "goal": "상품페이지에서 제품 형태와 소재감을 안정적으로 보여주기",
+        "tone": "제품 충실도 최우선, 움직임은 절제",
+    },
+    "SNS Short Video": {
+        "ratio": "4:5",
+        "duration": "10 seconds",
+        "goal": "Instagram/X/Pinterest용 짧은 감성 소재 만들기",
+        "tone": "조금 더 감성적이지만 상품 변형 금지",
+    },
+    "Ad Creative Test": {
+        "ratio": "1:1",
+        "duration": "5 seconds",
+        "goal": "광고 첫 노출에서 제품 매력을 빠르게 전달",
+        "tone": "초반 시선 집중, 단 과한 연출 금지",
+    },
+    "Brand Mood Clip": {
+        "ratio": "16:9",
+        "duration": "10 seconds",
+        "goal": "카테고리/브랜드 무드를 보여주는 짧은 분위기 영상",
+        "tone": "브랜드 세계관 중심, 상품 일관성 유지",
+    },
+}
 RATIO_OPTIONS = ["1:1", "4:5", "9:16", "16:9"]
 DURATION_OPTIONS = ["5 seconds", "10 seconds"]
+TAKE_STATUS_OPTIONS = ["Prompt Ready", "Submitted to Kling", "Generated", "Accepted", "Rejected", "Uploaded to Shopify"]
+ISSUE_OPTIONS = [
+    "상품 색상이 바뀜",
+    "상품 형태가 무너짐",
+    "가방 스트랩/손잡이가 이상함",
+    "양말 패턴/길이가 바뀜",
+    "모델/손/발이 어색함",
+    "배경이 복잡함",
+    "움직임이 과함",
+    "제품이 너무 작음",
+    "텍스트/로고/가짜 문자가 생김",
+    "흐림/디테일 부족",
+    "기타",
+]
 IMAGE_TYPE_LABELS = {
     "single_product": "단일 상품컷",
     "model_shot": "모델/착용컷",
@@ -67,6 +107,33 @@ def fetch_html(url: str) -> str:
     response = requests.get(url, headers=HEADERS, timeout=20)
     response.raise_for_status()
     return response.text
+
+
+def dedupe_and_filter_images(images: list[dict]) -> list[dict]:
+    seen = set()
+    cleaned = []
+    blocked_patterns = ["icon", "logo", "sprite", "placeholder", "payment", "favicon", "no-image", "loading"]
+
+    for item in images:
+        raw_url = item.get("url", "")
+        if not raw_url or raw_url.startswith("data:"):
+            continue
+        parsed = urlparse(raw_url)
+        if not parsed.scheme.startswith("http"):
+            continue
+        lowered = raw_url.lower()
+        if any(p in lowered for p in blocked_patterns):
+            continue
+        if not any(ext in lowered for ext in [".jpg", ".jpeg", ".png", ".webp", "cdn.shopify.com", "alicdn", "ae01"]):
+            continue
+        dedupe_key = re.sub(r"_(\d+x\d+|\d+x|x\d+)\.(jpg|jpeg|png|webp)", r".\2", raw_url, flags=re.I)
+        dedupe_key = dedupe_key.split("?")[0]
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(item)
+
+    return cleaned[:40]
 
 
 def extract_shopify_product_data(url: str, html: str) -> dict:
@@ -118,7 +185,6 @@ def extract_shopify_product_data(url: str, html: str) -> dict:
         description = description or normalize_space(product_json.get("description", ""))
 
     images = []
-
     json_images = product_json.get("image", []) if product_json else []
     if isinstance(json_images, str):
         json_images = [json_images]
@@ -151,33 +217,6 @@ def extract_shopify_product_data(url: str, html: str) -> dict:
     return {"url": url, "title": title, "description": description, "price": price, "images": images}
 
 
-def dedupe_and_filter_images(images: list[dict]) -> list[dict]:
-    seen = set()
-    cleaned = []
-    blocked_patterns = ["icon", "logo", "sprite", "placeholder", "payment", "favicon", "no-image", "loading"]
-
-    for item in images:
-        raw_url = item.get("url", "")
-        if not raw_url or raw_url.startswith("data:"):
-            continue
-        parsed = urlparse(raw_url)
-        if not parsed.scheme.startswith("http"):
-            continue
-        lowered = raw_url.lower()
-        if any(p in lowered for p in blocked_patterns):
-            continue
-        if not any(ext in lowered for ext in [".jpg", ".jpeg", ".png", ".webp", "cdn.shopify.com", "alicdn", "ae01"]):
-            continue
-        dedupe_key = re.sub(r"_(\d+x\d+|\d+x|x\d+)\.(jpg|jpeg|png|webp)", r".\2", raw_url, flags=re.I)
-        dedupe_key = dedupe_key.split("?")[0]
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        cleaned.append(item)
-
-    return cleaned[:40]
-
-
 def infer_category(title: str, description: str) -> str:
     text = f"{title} {description}".lower()
     if any(k in text for k in ["bag", "バッグ", "鞄", "かばん", "ショルダー", "トート", "ポーチ"]):
@@ -203,19 +242,100 @@ def json_from_text(text: str) -> dict:
         raise
 
 
-def build_vision_messages(product: dict, images_for_analysis: list[dict], category: str) -> list[dict]:
+def video_type_settings(video_type: str) -> dict:
+    return VIDEO_TYPE_OPTIONS.get(video_type, VIDEO_TYPE_OPTIONS["Shopify Product Video"])
+
+
+def product_lock_rules(category: str) -> list[str]:
+    base = [
+        "Do not add any text, captions, typography, letters, logos, watermarks, or subtitles.",
+        "Keep the original product design, color, silhouette, texture, material, and proportions faithful to the reference images.",
+        "Use subtle, realistic motion only; avoid dramatic transformation or fantasy effects.",
+        "Keep the background clean and avoid unrelated accessories or objects.",
+    ]
+    if category == "Bag":
+        base += [
+            "Do not change the bag strap, handle, buckle, zipper, stitching, pocket position, or overall structure.",
+            "Do not add extra straps, extra handles, charms, logos, or hardware that are not visible in the reference images.",
+        ]
+    elif category == "Socks":
+        base += [
+            "Do not change the sock pattern, color, length, fabric texture, ribbing, transparency, or pair structure.",
+            "Avoid unrealistic feet, distorted legs, or fabric deformation.",
+        ]
+    elif category == "Hat / Scarf":
+        base += [
+            "Do not change the shape, brim, weave, fabric texture, pattern, or drape of the item.",
+        ]
+    return base
+
+
+def build_scene_card(product: dict, category: str, video_type: str, style: str, ratio: str, duration: str, selected_pair: dict | None, selected_images: list[dict]) -> dict:
+    settings = video_type_settings(video_type)
+    start_id = selected_pair.get("start_image_id") if selected_pair else (selected_images[0].get("image_id") if selected_images else "")
+    end_id = selected_pair.get("end_image_id") if selected_pair else (selected_images[1].get("image_id") if len(selected_images) > 1 else "")
+    return {
+        "product_title": product.get("title", ""),
+        "product_url": product.get("url", ""),
+        "category": category,
+        "video_type": video_type,
+        "goal": settings.get("goal", ""),
+        "style": style,
+        "ratio": ratio,
+        "duration": duration,
+        "start_image_id": start_id,
+        "end_image_id": end_id,
+        "camera_motion": selected_pair.get("suggested_motion", "subtle camera movement") if selected_pair else "subtle camera movement",
+        "lighting": "soft natural light",
+        "background": "clean minimal ecommerce background",
+        "product_lock": product_lock_rules(category),
+        "cautions": selected_pair.get("cautions_ko", "") if selected_pair else "",
+    }
+
+
+def scene_card_markdown(scene_card: dict) -> str:
+    locks = "\n".join([f"- {rule}" for rule in scene_card.get("product_lock", [])])
+    return f"""### Scene Card
+
+**Product:** {scene_card.get('product_title')}  
+**Video Type:** {scene_card.get('video_type')}  
+**Goal:** {scene_card.get('goal')}  
+**Category:** {scene_card.get('category')}  
+**Start Image:** {scene_card.get('start_image_id')}  
+**End Image:** {scene_card.get('end_image_id')}  
+**Camera Motion:** {scene_card.get('camera_motion')}  
+**Lighting:** {scene_card.get('lighting')}  
+**Background:** {scene_card.get('background')}  
+**Ratio / Duration:** {scene_card.get('ratio')} / {scene_card.get('duration')}  
+
+**Product Lock**
+{locks}
+
+**Cautions:** {scene_card.get('cautions') or '-'}
+""".strip()
+
+
+def build_vision_messages(product: dict, images_for_analysis: list[dict], category: str, video_type: str) -> list[dict]:
+    settings = video_type_settings(video_type)
     instructions = f"""
 You are an ecommerce creative director and image selector for Kling AI image-to-video generation.
 The store is SocksLover, a Japanese Shopify store.
 Kling will use exactly 2 images: one start frame and one end frame.
-Your job is to analyze product images and recommend the best image pair.
+Your job is to analyze product images and recommend the best image pair for the selected video type.
 
 Product:
 - title: {product.get('title')}
 - description: {product.get('description')}
 - category: {category}
+- video_type: {video_type}
+- video_goal: {settings.get('goal')}
+- video_tone: {settings.get('tone')}
 
 Selection principles:
+- For Shopify Product Video, prefer clean product-only continuity and low deformation risk.
+- For SNS Short Video, model/lifestyle shots can be considered only when continuity is natural.
+- For Ad Creative Test, prioritize a visually strong start frame while preserving product accuracy.
+- For Brand Mood Clip, allow more atmosphere but avoid changing the product.
 - Prefer clean single-product images.
 - Prefer two images that look like the same product, same color, similar background, and natural visual continuity.
 - Avoid collage images, multi-product group images, heavy model/body-focused images, and images with too many unrelated objects.
@@ -260,7 +380,7 @@ Return up to 3 pair recommendations. If no good pair exists, return the least ri
     return [{"role": "user", "content": content}]
 
 
-def analyze_images_and_pairs(product: dict, images_for_analysis: list[dict], category: str, model: str, api_key: str) -> dict:
+def analyze_images_and_pairs(product: dict, images_for_analysis: list[dict], category: str, video_type: str, model: str, api_key: str) -> dict:
     if not api_key:
         raise ValueError("OpenAI API Key를 입력해야 GPT Vision 분석을 사용할 수 있습니다.")
     if OpenAI is None:
@@ -269,7 +389,7 @@ def analyze_images_and_pairs(product: dict, images_for_analysis: list[dict], cat
     client = OpenAI(api_key=api_key.strip())
     response = client.chat.completions.create(
         model=model,
-        messages=build_vision_messages(product, images_for_analysis, category),
+        messages=build_vision_messages(product, images_for_analysis, category, video_type),
         temperature=0.1,
         response_format={"type": "json_object"},
     )
@@ -283,16 +403,7 @@ def get_analysis_for_image(analysis: dict, image_id: str) -> dict:
     return {}
 
 
-def build_prompt_request(
-    product: dict,
-    selected_images: list[dict],
-    category: str,
-    style: str,
-    ratio: str,
-    duration: str,
-    selected_pair: dict | None,
-    image_analysis: dict | None,
-) -> str:
+def build_prompt_request(product: dict, selected_images: list[dict], category: str, video_type: str, style: str, ratio: str, duration: str, selected_pair: dict | None, image_analysis: dict | None, scene_card: dict | None) -> str:
     image_notes = []
     for img in selected_images:
         analysis_item = get_analysis_for_image(image_analysis or {}, img.get("image_id"))
@@ -326,12 +437,20 @@ Product information:
 - Product title: {product.get('title')}
 - Product description: {product.get('description')}
 - Category: {category}
+- Video type: {video_type}
+- Video goal: {video_type_settings(video_type).get('goal')}
 - Desired style: {style}
 - Desired aspect ratio: {ratio}
 - Desired duration: {duration}
 
 Selected reference images:
 {chr(10).join(image_notes)}
+
+Product Lock rules that must be included in the prompt:
+{chr(10).join(['- ' + r for r in product_lock_rules(category)])}
+
+Scene Card:
+{json.dumps(scene_card or {}, ensure_ascii=False, indent=2)}
 
 {pair_notes}
 
@@ -351,6 +470,9 @@ Write comma-separated negative keywords and phrases.
 
 ## Korean Notes
 한국어로 짧게, 이 프롬프트의 의도와 Kling에서 주의할 점을 설명하세요.
+
+## Regeneration Tip
+If the first Kling take fails, write one short English instruction for the next generation attempt.
 """.strip()
 
 
@@ -364,7 +486,7 @@ def generate_prompt_with_openai(prompt_request: str, model: str, api_key: str) -
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You create safe, faithful, practical ecommerce video-generation prompts. Never add text overlays to the video prompt."},
+            {"role": "system", "content": "You create safe, faithful, practical ecommerce video-generation prompts. Never add text overlays to the video prompt. Preserve product identity and write practical prompts for Kling."},
             {"role": "user", "content": prompt_request},
         ],
         temperature=0.35,
@@ -387,7 +509,47 @@ wrong product shape, changed color, changed pattern, distorted product, deformed
 
 ## Korean Notes
 OpenAI API Key가 입력되지 않아 기본 프롬프트를 표시했습니다. 상품 카테고리와 선택 이미지에 맞춰 세부 표현을 수동으로 조금 보정한 뒤 Kling에 입력해주세요.
+
+## Regeneration Tip
+Make the motion more subtle and keep the product perfectly faithful to the reference images.
 """
+
+
+def build_regeneration_request(product: dict, scene_card: dict, issues: list[str], memo: str, generated_prompt: str) -> str:
+    return f"""
+You are helping improve a Kling AI product video generation prompt.
+The previous generation had issues. Create a short English regeneration instruction to append to the next Kling prompt.
+Do not rewrite the entire prompt. Focus only on correcting the issues.
+
+Product: {product.get('title')}
+Scene Card: {json.dumps(scene_card, ensure_ascii=False)}
+Issues: {', '.join(issues)}
+Operator memo: {memo}
+Previous prompt:
+{generated_prompt[:2500]}
+
+Return this exact structure:
+## Regeneration Instruction
+One concise English paragraph.
+
+## Korean Note
+한국어로 왜 이렇게 수정해야 하는지 짧게 설명.
+""".strip()
+
+
+def generate_regeneration_instruction(request_text: str, model: str, api_key: str) -> str:
+    if not api_key:
+        return "## Regeneration Instruction\nMake the motion more subtle and keep the product perfectly faithful to the reference images. Do not change the product color, shape, pattern, strap, handle, material, or proportions. Avoid text, logos, extra objects, and dramatic transformations.\n\n## Korean Note\nAPI Key가 없어 기본 개선 프롬프트를 표시했습니다. 선택한 문제에 맞춰 수동으로 조금 보정해주세요."
+    client = OpenAI(api_key=api_key.strip())
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You create concise corrective instructions for Kling AI product video regeneration."},
+            {"role": "user", "content": request_text},
+        ],
+        temperature=0.25,
+    )
+    return response.choices[0].message.content.strip()
 
 
 def download_image(url: str) -> bytes | None:
@@ -402,7 +564,7 @@ def download_image(url: str) -> bytes | None:
         return None
 
 
-def create_zip(product_title: str, selected_images: list[dict], prompt_text: str, analysis: dict | None, selected_pair: dict | None) -> tuple[str, bytes]:
+def create_zip(product_title: str, selected_images: list[dict], prompt_text: str, analysis: dict | None, selected_pair: dict | None, scene_card: dict | None) -> tuple[str, bytes]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = safe_filename(product_title)
     zip_name = f"{timestamp}_{base}_kling_assets.zip"
@@ -416,6 +578,9 @@ def create_zip(product_title: str, selected_images: list[dict], prompt_text: str
             zf.writestr("vision_analysis.json", json.dumps(analysis, ensure_ascii=False, indent=2))
         if selected_pair:
             zf.writestr("selected_pair.json", json.dumps(selected_pair, ensure_ascii=False, indent=2))
+        if scene_card:
+            zf.writestr("scene_card.json", json.dumps(scene_card, ensure_ascii=False, indent=2))
+            zf.writestr("scene_card.md", scene_card_markdown(scene_card))
         for i, img in enumerate(selected_images, start=1):
             img_bytes = download_image(img["url"])
             if not img_bytes:
@@ -437,11 +602,23 @@ def create_zip(product_title: str, selected_images: list[dict], prompt_text: str
 def append_log(row: dict) -> None:
     exists = os.path.exists(LOG_FILE)
     fieldnames = [
-        "created_at", "product_url", "product_title", "category", "style", "ratio", "duration",
-        "selected_image_ids", "selected_pair_score", "model", "prompt_hash", "video_created",
-        "shopify_uploaded", "memo",
+        "created_at", "product_url", "product_title", "category", "video_type", "style", "ratio", "duration",
+        "selected_image_ids", "selected_pair_score", "model", "prompt_hash", "video_created", "shopify_uploaded", "memo",
     ]
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def append_take_log(row: dict) -> None:
+    exists = os.path.exists(TAKE_LOG_FILE)
+    fieldnames = [
+        "created_at", "product_url", "product_title", "video_type", "take_no", "status",
+        "issue_types", "final_rating", "kling_result_url", "shopify_uploaded", "memo",
+    ]
+    with open(TAKE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not exists:
             writer.writeheader()
@@ -495,8 +672,8 @@ def selected_images_from_pair(images: list[dict], pair: dict | None) -> list[dic
 
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🧦", layout="wide")
-    st.title("🧦 SocksLover Kling Prompt Assistant")
-    st.caption("Shopify 상품 URL에서 이미지를 추출하고, GPT Vision으로 Kling용 시작/끝 이미지 pair를 추천하는 반자동 MVP v4.3")
+    st.title("🧦 SocksLover Mini ShotFlow")
+    st.caption("상품 이미지·프롬프트·Scene Card·Take Log를 관리하는 SocksLover용 Mini ShotFlow MVP v4.4")
 
     with st.sidebar:
         st.header("설정")
@@ -515,7 +692,10 @@ def main():
         st.write("✅ 이미지 카드 표시")
         st.write("✅ GPT Vision 이미지 유형/적합도 분석")
         st.write("✅ Pair 추천 자동화")
+        st.write("✅ Scene Card 생성")
+        st.write("✅ Product Lock 자동 삽입")
         st.write("✅ Kling 프롬프트 생성")
+        st.write("✅ Take Log / 재생성 프롬프트")
         st.write("❌ Kling API 연동 없음")
         st.write("❌ Shopify 업로드 자동화 없음")
 
@@ -531,9 +711,8 @@ def main():
                     html = fetch_html(product_url.strip())
                     product = extract_shopify_product_data(product_url.strip(), html)
                     st.session_state["product"] = product
-                    st.session_state.pop("vision_analysis", None)
-                    st.session_state.pop("generated_prompt", None)
-                    st.session_state.pop("selected_pair", None)
+                    for k in ["vision_analysis", "generated_prompt", "selected_pair", "selected_images", "prompt_meta", "scene_card", "regen_prompt"]:
+                        st.session_state.pop(k, None)
                 except Exception as e:
                     st.error(f"상품 정보를 가져오지 못했습니다: {e}")
 
@@ -557,12 +736,25 @@ def main():
     inferred = infer_category(product.get("title", ""), product.get("description", ""))
     category = st.selectbox("상품 카테고리", CATEGORY_OPTIONS, index=CATEGORY_OPTIONS.index(inferred) if inferred in CATEGORY_OPTIONS else 0)
 
-    st.subheader("2. 이미지 카드")
+    st.subheader("2. 영상 용도 / Product Lock")
+    video_type = st.selectbox("영상 용도", list(VIDEO_TYPE_OPTIONS.keys()), index=0)
+    vset = video_type_settings(video_type)
+    vc1, vc2, vc3 = st.columns(3)
+    vc1.metric("기본 비율", vset.get("ratio"))
+    vc2.metric("기본 길이", vset.get("duration"))
+    with vc3:
+        st.write("**목표**")
+        st.write(vset.get("goal"))
+    with st.expander("Product Lock 자동 삽입 규칙 보기", expanded=False):
+        for rule in product_lock_rules(category):
+            st.write(f"- {rule}")
+
+    st.subheader("3. 이미지 카드")
     st.caption("GPT Vision 분석 전에는 단순 이미지 목록만 표시됩니다. 분석 후에는 유형/적합도/추천 사유가 카드에 표시됩니다.")
     render_image_cards(product.get("images", []), st.session_state.get("vision_analysis"))
 
-    st.subheader("3. GPT Vision 이미지 분석 & Pair 추천")
-    st.caption("Kling에서 시작/끝 프레임으로 쓰기 좋은 2장 조합을 추천합니다. 콜라주/여러상품/착샷 혼합 위험을 자동으로 평가합니다.")
+    st.subheader("4. GPT Vision 이미지 분석 & Pair 추천")
+    st.caption("선택한 영상 용도 기준으로 Kling에서 시작/끝 프레임으로 쓰기 좋은 2장 조합을 추천합니다.")
     analyze_clicked = st.button("GPT Vision으로 분석하고 Pair 추천", type="primary", use_container_width=True)
 
     if analyze_clicked:
@@ -575,7 +767,7 @@ def main():
             else:
                 with st.spinner("GPT Vision이 이미지를 분석하고 추천 조합을 만드는 중입니다..."):
                     try:
-                        analysis = analyze_images_and_pairs(product, images_for_analysis, category, model, api_key)
+                        analysis = analyze_images_and_pairs(product, images_for_analysis, category, video_type, model, api_key)
                         st.session_state["vision_analysis"] = analysis
                         st.success("분석 완료. 아래 추천 조합을 확인해주세요.")
                         st.rerun()
@@ -587,7 +779,7 @@ def main():
     selected_images = []
 
     if analysis:
-        st.subheader("4. 추천 Pair TOP 3")
+        st.subheader("5. 추천 Pair TOP 3")
         pairs = analysis.get("pair_recommendations", [])
         if pairs:
             for pair in pairs:
@@ -618,14 +810,16 @@ def main():
         if analysis.get("overall_notes_ko"):
             st.info(analysis.get("overall_notes_ko"))
 
-    st.subheader("5. Kling 프롬프트 조건")
+    st.subheader("6. Scene Card / Kling 프롬프트 조건")
     c1, c2, c3 = st.columns(3)
     with c1:
         style = st.selectbox("영상 스타일", STYLE_OPTIONS, index=0)
     with c2:
-        ratio = st.selectbox("추천 비율", RATIO_OPTIONS, index=0)
+        default_ratio = vset.get("ratio", "1:1")
+        ratio = st.selectbox("추천 비율", RATIO_OPTIONS, index=RATIO_OPTIONS.index(default_ratio) if default_ratio in RATIO_OPTIONS else 0)
     with c3:
-        duration = st.selectbox("영상 길이", DURATION_OPTIONS, index=0)
+        default_duration = vset.get("duration", "5 seconds")
+        duration = st.selectbox("영상 길이", DURATION_OPTIONS, index=DURATION_OPTIONS.index(default_duration) if default_duration in DURATION_OPTIONS else 0)
 
     st.caption("원칙: 영상 안에 텍스트/자막/로고를 넣지 않습니다. Kling에는 추천된 2장만 업로드하는 것을 권장합니다.")
 
@@ -638,26 +832,32 @@ def main():
             if len(selected_images) > 1:
                 st.image(selected_images[1]["url"], caption=f"End: 사용 {selected_images[1].get('image_id')}", use_container_width=True)
 
-    generate_clicked = st.button("선택 Pair 기반 Kling용 프롬프트 생성", type="primary", use_container_width=True)
+    scene_card = None
+    if selected_images and len(selected_images) >= 2:
+        scene_card = build_scene_card(product, category, video_type, style, ratio, duration, selected_pair or st.session_state.get("selected_pair", {}), selected_images)
+        st.markdown(scene_card_markdown(scene_card))
+        st.session_state["scene_card"] = scene_card
+
+    generate_clicked = st.button("Scene Card 기반 Kling용 프롬프트 생성", type="primary", use_container_width=True)
 
     if generate_clicked:
         if not selected_images or len(selected_images) < 2:
             st.error("먼저 추천 Pair를 선택해주세요. Kling 시작/끝 프레임에는 2장이 필요합니다.")
         else:
             with st.spinner("GPT가 Kling용 프롬프트를 생성하는 중입니다..."):
-                prompt_request = build_prompt_request(product, selected_images, category, style, ratio, duration, selected_pair, analysis)
+                prompt_request = build_prompt_request(product, selected_images, category, video_type, style, ratio, duration, selected_pair, analysis, scene_card)
                 try:
                     result = generate_prompt_with_openai(prompt_request, model, api_key)
                 except Exception as e:
                     result = f"프롬프트 생성 실패: {e}\n\n" + fallback_prompt()
                 st.session_state["generated_prompt"] = result
                 st.session_state["selected_images"] = selected_images
-                st.session_state["prompt_meta"] = {"category": category, "style": style, "ratio": ratio, "duration": duration, "model": model}
+                st.session_state["prompt_meta"] = {"category": category, "video_type": video_type, "style": style, "ratio": ratio, "duration": duration, "model": model}
 
     generated = st.session_state.get("generated_prompt")
     if generated:
         st.divider()
-        st.subheader("6. 생성된 Kling 프롬프트")
+        st.subheader("7. 생성된 Kling 프롬프트")
         st.text_area("복사해서 Kling에 붙여넣기", value=generated, height=420)
 
         d1, d2, d3 = st.columns(3)
@@ -670,6 +870,7 @@ def main():
                     "product_url": product.get("url"),
                     "product_title": product.get("title"),
                     "category": meta.get("category"),
+                    "video_type": meta.get("video_type"),
                     "style": meta.get("style"),
                     "ratio": meta.get("ratio"),
                     "duration": meta.get("duration"),
@@ -689,6 +890,7 @@ def main():
                 generated,
                 st.session_state.get("vision_analysis"),
                 st.session_state.get("selected_pair"),
+                st.session_state.get("scene_card"),
             )
             st.download_button("선택 이미지 + 프롬프트 ZIP 다운로드", data=zip_bytes, file_name=zip_name, mime="application/zip", use_container_width=True)
         with d3:
@@ -696,14 +898,62 @@ def main():
                 with open(LOG_FILE, "rb") as f:
                     st.download_button("CSV 로그 다운로드", data=f.read(), file_name="generation_log.csv", mime="text/csv", use_container_width=True)
 
-        st.subheader("7. 수동 운영 체크리스트")
+        st.subheader("8. Kling Take Log / 재생성 프롬프트")
+        with st.container(border=True):
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                take_no = st.number_input("Take 번호", min_value=1, value=1, step=1)
+                take_status = st.selectbox("상태", TAKE_STATUS_OPTIONS, index=1)
+            with t2:
+                final_rating = st.slider("결과 평가", min_value=0, max_value=5, value=0, help="0=미평가, 5=채택 가능")
+                shopify_uploaded = st.checkbox("Shopify 등록 완료")
+            with t3:
+                kling_result_url = st.text_input("Kling 결과 URL/파일명", placeholder="선택 입력")
+            issue_types = st.multiselect("문제 유형", ISSUE_OPTIONS)
+            take_memo = st.text_area("메모", placeholder="예: 스트랩이 하나 더 생김 / 제품은 안정적이나 배경이 복잡함")
+            lc1, lc2 = st.columns(2)
+            with lc1:
+                if st.button("Take Log 저장", use_container_width=True):
+                    meta = st.session_state.get("prompt_meta", {})
+                    append_take_log({
+                        "created_at": datetime.now().isoformat(timespec="seconds"),
+                        "product_url": product.get("url"),
+                        "product_title": product.get("title"),
+                        "video_type": meta.get("video_type"),
+                        "take_no": take_no,
+                        "status": take_status,
+                        "issue_types": ", ".join(issue_types),
+                        "final_rating": final_rating,
+                        "kling_result_url": kling_result_url,
+                        "shopify_uploaded": "yes" if shopify_uploaded else "",
+                        "memo": take_memo,
+                    })
+                    st.success(f"Take Log 저장 완료: {TAKE_LOG_FILE}")
+            with lc2:
+                if os.path.exists(TAKE_LOG_FILE):
+                    with open(TAKE_LOG_FILE, "rb") as f:
+                        st.download_button("Take Log CSV 다운로드", data=f.read(), file_name="take_log.csv", mime="text/csv", use_container_width=True)
+
+            if st.button("문제 기반 재생성 프롬프트 만들기", use_container_width=True):
+                scene_card_for_regen = st.session_state.get("scene_card", {})
+                req = build_regeneration_request(product, scene_card_for_regen, issue_types, take_memo, generated)
+                try:
+                    regen = generate_regeneration_instruction(req, model, api_key)
+                except Exception as e:
+                    regen = f"재생성 프롬프트 생성 실패: {e}"
+                st.session_state["regen_prompt"] = regen
+            if st.session_state.get("regen_prompt"):
+                st.text_area("Kling 재생성용 추가 지시문", value=st.session_state.get("regen_prompt"), height=180)
+
+        st.subheader("9. 수동 운영 체크리스트")
         st.markdown(
             """
 - ZIP 안의 시작/끝 이미지 2장을 Kling에 업로드합니다.
+- Scene Card를 보고 영상 목적과 Product Lock을 확인합니다.
 - 생성된 Main Prompt / Negative Prompt를 Kling에 붙여넣습니다.
 - 영상 안에 텍스트, 로고, 가짜 문자가 생기면 재생성합니다.
 - 상품 디자인, 색상, 패턴, 스트랩, 소재감이 실제 상품과 다르면 사용하지 않습니다.
-- 최종 MP4를 다운로드한 뒤 Shopify 상품 미디어에 수동 등록합니다.
+- Kling 결과를 Take Log에 기록하고, 채택 가능한 영상만 Shopify 상품 미디어에 수동 등록합니다.
             """.strip()
         )
 
