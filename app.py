@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
 # =========================================================
 
 APP_TITLE = "SocksLover AI Content Engine"
-APP_VERSION = "MVP v5.1 Single Image StoryFlow"
+APP_VERSION = "MVP v5.2 Scene Image Preview"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 OUTPUT_DIR = "outputs"
@@ -1987,6 +1987,31 @@ def create_storyflow_zip(
             ),
         )
 
+        selected_image_manifest = []
+        for scene_number, recommendation in image_map.items():
+            selected_image = selected_image_by_id(
+                product.get("images", []),
+                recommendation.get("image_id"),
+            )
+            selected_image_manifest.append(
+                {
+                    "scene_number": scene_number,
+                    "image_id": recommendation.get("image_id"),
+                    "image_score": recommendation.get("image_score"),
+                    "reason_ko": recommendation.get("reason_ko"),
+                    "image_url": selected_image.get("url") if selected_image else "",
+                }
+            )
+
+        archive.writestr(
+            "scene_selected_images.json",
+            json.dumps(
+                selected_image_manifest,
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
         archive.writestr(
             "captions_ja.srt",
             srt_text.encode("utf-8-sig"),
@@ -2829,14 +2854,39 @@ def render_storyboard_scene_single_image(
                 selected_recommendation.get("image_id"),
             )
 
+            st.markdown("#### Kling에 넣을 기준 이미지")
+            image_meta_1, image_meta_2 = st.columns(2)
+            with image_meta_1:
+                st.metric(
+                    "선택 이미지 번호",
+                    f"사용 {selected_recommendation.get('image_id')}",
+                )
+            with image_meta_2:
+                st.metric(
+                    "AI 적합도",
+                    f"{selected_recommendation.get('image_score', '-')}점",
+                )
+
             if selected_image:
                 st.image(
                     selected_image["url"],
-                    caption=f"기준 이미지: 사용 {selected_recommendation.get('image_id')}",
+                    caption=(
+                        f"Scene {scene_number} 기준 이미지 · "
+                        f"사용 {selected_recommendation.get('image_id')}"
+                    ),
                     use_container_width=True,
                 )
+                st.code(selected_image["url"], language=None)
+            else:
+                st.error(
+                    f"선택된 이미지 ID {selected_recommendation.get('image_id')}를 "
+                    "상품 이미지 목록에서 찾지 못했습니다."
+                )
 
-            st.caption(selected_recommendation.get("reason_ko", ""))
+            st.info(
+                "선정 이유: "
+                + (selected_recommendation.get("reason_ko") or "-")
+            )
             if selected_recommendation.get("cautions_ko"):
                 st.warning(selected_recommendation.get("cautions_ko"), icon="⚠️")
 
@@ -3909,6 +3959,16 @@ def render_storyflow(
         )
     )
 
+    # Older Streamlit sessions may contain Vision results created before
+    # scene-level single-image recommendations were introduced. Normalize
+    # them again here so the Storyboard Editor always has visible images.
+    analysis = normalize_scene_image_recommendations(
+        product.get("images", []),
+        analysis,
+        scene_count=3,
+    )
+    st.session_state["vision_analysis"] = analysis
+
     scene_image_recommendations = analysis.get(
         "scene_image_recommendations",
         [],
@@ -3918,6 +3978,36 @@ def render_storyflow(
         scene_image_label(item): item
         for item in scene_image_recommendations
     }
+
+    st.markdown("### Scene별 AI 추천 이미지")
+    if scene_image_recommendations:
+        preview_columns = st.columns(3)
+        for index, recommendation in enumerate(scene_image_recommendations[:3]):
+            scene_number = int(recommendation.get("scene_number") or index + 1)
+            selected_image = selected_image_by_id(
+                product.get("images", []),
+                recommendation.get("image_id"),
+            )
+            with preview_columns[index]:
+                st.markdown(f"**Scene {scene_number}**")
+                if selected_image:
+                    st.image(
+                        selected_image["url"],
+                        caption=(
+                            f"사용 {recommendation.get('image_id')} · "
+                            f"{recommendation.get('image_score', '-')}점"
+                        ),
+                        use_container_width=True,
+                    )
+                else:
+                    st.warning(
+                        f"이미지 {recommendation.get('image_id')}를 찾지 못했습니다."
+                    )
+                st.caption(recommendation.get("reason_ko", ""))
+    else:
+        st.warning(
+            "Scene별 추천 이미지가 없습니다. GPT Vision 분석을 다시 실행해주세요."
+        )
 
     scene_image_map = {}
 
