@@ -1,5 +1,5 @@
-streamlit>=1.34.0
-openai>=1.40.0
-requests>=2.31.0
+streamlit>=1.41.0
+openai>=1.55.0
+requests>=2.32.0
 beautifulsoup4>=4.12.0
-pandas>=2.0.0
+pandas>=2.2.0
