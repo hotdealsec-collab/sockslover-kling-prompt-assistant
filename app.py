@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
 # =========================================================
 
 APP_TITLE = "SocksLover AI Content Engine"
-APP_VERSION = "MVP v5.2 Scene Image Preview"
+APP_VERSION = "MVP v5.3 Scene Image Fallback"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 OUTPUT_DIR = "outputs"
@@ -917,52 +917,77 @@ def normalize_scene_image_recommendations(
     analysis: dict,
     scene_count: int = 3,
 ) -> dict:
-    """Return one valid reference image recommendation for each StoryFlow scene."""
-    if not analysis:
-        return analysis
+    """Always provide one valid single reference image for every StoryFlow scene.
 
-    valid_ids = {str(image.get("image_id")) for image in product_images}
+    GPT may omit scene_image_recommendations or optional scores. In that case,
+    this function falls back to the Vision image list and finally to the first
+    valid Shopify product images, so the Storyboard Editor never stays empty.
+    """
+    analysis = analysis or {}
+
+    valid_images = [
+        image for image in product_images
+        if image.get("url") and image.get("image_id") is not None
+    ]
+    valid_ids = {str(image.get("image_id")) for image in valid_images}
     image_analysis = {
         str(item.get("image_id")): item
         for item in analysis.get("images", [])
+        if item.get("image_id") is not None
     }
 
-    by_scene = {}
-    used_ids = set()
+    by_scene: dict[int, dict] = {}
+    used_ids: set[str] = set()
 
+    # 1. Preserve valid GPT scene-level recommendations.
     for item in analysis.get("scene_image_recommendations", []) or []:
-        image_id = str(item.get("image_id", "")).strip()
-        scene_number = int(item.get("scene_number") or 0)
+        try:
+            scene_number = int(item.get("scene_number") or 0)
+        except (TypeError, ValueError):
+            continue
 
-        if scene_number < 1 or scene_number > scene_count:
+        image_id = str(item.get("image_id", "")).strip()
+        if not (1 <= scene_number <= scene_count):
             continue
         if image_id not in valid_ids:
             continue
 
         judged = image_analysis.get(image_id, {})
-        if judged.get("is_global_default"):
+        if judged.get("is_global_default") is True:
             continue
-        if int(judged.get("relevance_score") or 100) < 30:
+
+        relevance_raw = judged.get("relevance_score")
+        relevance = 70 if relevance_raw in (None, "") else int(relevance_raw or 0)
+        if relevance < 30:
             continue
+
+        candidate = dict(item)
+        candidate["image_id"] = image_id
+        candidate.setdefault("image_score", judged.get("suitability_score", 70) or 70)
+        candidate.setdefault("reason_ko", "GPT Vision이 해당 Scene에 적합한 단일 기준 이미지로 추천했습니다.")
+        candidate.setdefault("cautions_ko", "실제 상품 색상과 패턴을 최종 확인해주세요.")
+        candidate.setdefault("suggested_motion", "subtle natural motion, gentle camera push-in, slight parallax")
 
         current = by_scene.get(scene_number)
-        score = int(item.get("image_score") or 0)
-        current_score = int(current.get("image_score") or 0) if current else -1
-        if current is None or score > current_score:
-            item["image_id"] = image_id
-            by_scene[scene_number] = item
+        if current is None or int(candidate.get("image_score") or 0) > int(current.get("image_score") or 0):
+            by_scene[scene_number] = candidate
             used_ids.add(image_id)
 
-    ranked_images = []
-    for image in product_images:
+    # 2. Rank Vision-analyzed images. Missing optional scores receive safe defaults.
+    ranked_images: list[tuple[int, str, str]] = []
+    for image in valid_images:
         image_id = str(image.get("image_id"))
         judged = image_analysis.get(image_id, {})
-        if judged.get("is_global_default"):
+
+        if judged.get("is_global_default") is True:
             continue
 
-        relevance = int(judged.get("relevance_score") or 0)
-        suitability = int(judged.get("suitability_score") or 0)
+        relevance_raw = judged.get("relevance_score")
+        suitability_raw = judged.get("suitability_score")
+        relevance = 70 if relevance_raw in (None, "") else int(relevance_raw or 0)
+        suitability = 60 if suitability_raw in (None, "") else int(suitability_raw or 0)
         image_type = judged.get("image_type", "unclear")
+
         if relevance < 30:
             continue
 
@@ -973,50 +998,60 @@ def normalize_scene_image_recommendations(
             "detail_shot": 10,
             "multi_product": -15,
             "collage": -25,
-            "unclear": -5,
-        }.get(image_type, -5)
+            "unclear": 0,
+        }.get(image_type, 0)
 
-        ranked_images.append((suitability + relevance + type_bonus, image_id, image_type))
+        ranked_images.append(
+            (suitability + relevance + type_bonus, image_id, image_type)
+        )
 
-    ranked_images.sort(reverse=True)
+    ranked_images.sort(key=lambda item: item[0], reverse=True)
+
+    # 3. Absolute fallback: use the first Shopify product images even when
+    # Vision omitted its image array or all optional scores.
+    if not ranked_images:
+        ranked_images = [
+            (70 - index, str(image.get("image_id")), "unclassified")
+            for index, image in enumerate(valid_images)
+        ]
 
     for scene_number in range(1, scene_count + 1):
         if scene_number in by_scene:
             continue
 
-        selected = None
-        for score, image_id, image_type in ranked_images:
-            if image_id not in used_ids:
-                selected = (score, image_id, image_type)
-                break
-
+        selected = next(
+            (item for item in ranked_images if item[1] not in used_ids),
+            None,
+        )
         if selected is None and ranked_images:
             selected = ranked_images[(scene_number - 1) % len(ranked_images)]
 
-        if selected:
-            score, image_id, image_type = selected
-            used_ids.add(image_id)
-            by_scene[scene_number] = {
-                "scene_number": scene_number,
-                "image_id": image_id,
-                "image_score": max(0, min(100, int(score / 2))),
-                "reason_ko": (
-                    "자동 보정 추천: 현재 상품과 관련성이 높고 "
-                    f"단일 이미지 기반 Kling 생성에 적합한 {image_type} 이미지입니다."
-                ),
-                "cautions_ko": "실제 상품 색상과 패턴이 정확한지 최종 확인해주세요.",
-                "suggested_motion": (
-                    "subtle natural movement, gentle camera push-in, "
-                    "slight parallax, keep the product perfectly faithful"
-                ),
-                "source": "heuristic_single_image_guard",
-            }
+        if selected is None:
+            continue
+
+        score, image_id, image_type = selected
+        used_ids.add(image_id)
+        by_scene[scene_number] = {
+            "scene_number": scene_number,
+            "image_id": image_id,
+            "image_score": max(0, min(100, int(score / 2))),
+            "reason_ko": (
+                "자동 보정 추천: 상품과 관련된 이미지 중 단일 이미지 기반 "
+                f"Kling 생성에 적합한 {image_type} 이미지를 배정했습니다."
+            ),
+            "cautions_ko": "실제 상품 색상과 패턴이 정확한지 최종 확인해주세요.",
+            "suggested_motion": (
+                "subtle natural movement, gentle camera push-in, "
+                "slight parallax, keep the product perfectly faithful"
+            ),
+            "source": "single_image_fallback_guard",
+        }
 
     analysis["scene_image_recommendations"] = [
         by_scene[scene_number]
-        for scene_number in sorted(by_scene)
-        if scene_number <= scene_count
-    ][:scene_count]
+        for scene_number in range(1, scene_count + 1)
+        if scene_number in by_scene
+    ]
     return analysis
 
 
@@ -4005,8 +4040,9 @@ def render_storyflow(
                     )
                 st.caption(recommendation.get("reason_ko", ""))
     else:
-        st.warning(
-            "Scene별 추천 이미지가 없습니다. GPT Vision 분석을 다시 실행해주세요."
+        st.error(
+            "상품 페이지에서 사용할 수 있는 이미지가 없어 Scene 이미지를 배정하지 못했습니다. "
+            "전체 추출 이미지와 분석 시작 번호를 확인해주세요."
         )
 
     scene_image_map = {}
