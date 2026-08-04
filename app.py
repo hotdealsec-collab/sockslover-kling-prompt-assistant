@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
 # =========================================================
 
 APP_TITLE = "SocksLover AI Content Engine"
-APP_VERSION = "MVP v5.0 TikTok StoryFlow"
+APP_VERSION = "MVP v5.1 Single Image StoryFlow"
 DEFAULT_MODEL = "gpt-4.1-mini"
 
 OUTPUT_DIR = "outputs"
@@ -552,10 +552,24 @@ Return JSON only:
       "suggested_motion": "visible but natural camera movement / gentle lifestyle motion / slight parallax"
     }}
   ],
+  "scene_image_recommendations": [
+    {{
+      "scene_number": 1,
+      "image_id": "1",
+      "image_score": 0,
+      "reason_ko": "Why this single image is suitable for this scene",
+      "cautions_ko": "Korean caution or empty string",
+      "suggested_motion": "subtle natural motion suitable for a single-image Kling generation"
+    }}
+  ],
   "overall_notes_ko": "Short Korean advice for the operator"
 }}
 
-Return up to 5 pair recommendations.
+For TikTok StoryFlow, recommend exactly one reference image for each of three scenes.
+Return three scene_image_recommendations with scene_number 1, 2, and 3.
+Prefer three different relevant images when possible, but reuse one only when the image inventory is limited.
+The recommended image must clearly show the current product and be suitable as a single Kling reference image.
+Also return up to 5 pair recommendations for the legacy Mini ShotFlow mode.
 Do not return any pair where start_image_id and end_image_id are the same.
 """.strip()
 
@@ -897,6 +911,129 @@ def normalize_pair_recommendations(
     return analysis
 
 
+
+def normalize_scene_image_recommendations(
+    product_images: list[dict],
+    analysis: dict,
+    scene_count: int = 3,
+) -> dict:
+    """Return one valid reference image recommendation for each StoryFlow scene."""
+    if not analysis:
+        return analysis
+
+    valid_ids = {str(image.get("image_id")) for image in product_images}
+    image_analysis = {
+        str(item.get("image_id")): item
+        for item in analysis.get("images", [])
+    }
+
+    by_scene = {}
+    used_ids = set()
+
+    for item in analysis.get("scene_image_recommendations", []) or []:
+        image_id = str(item.get("image_id", "")).strip()
+        scene_number = int(item.get("scene_number") or 0)
+
+        if scene_number < 1 or scene_number > scene_count:
+            continue
+        if image_id not in valid_ids:
+            continue
+
+        judged = image_analysis.get(image_id, {})
+        if judged.get("is_global_default"):
+            continue
+        if int(judged.get("relevance_score") or 100) < 30:
+            continue
+
+        current = by_scene.get(scene_number)
+        score = int(item.get("image_score") or 0)
+        current_score = int(current.get("image_score") or 0) if current else -1
+        if current is None or score > current_score:
+            item["image_id"] = image_id
+            by_scene[scene_number] = item
+            used_ids.add(image_id)
+
+    ranked_images = []
+    for image in product_images:
+        image_id = str(image.get("image_id"))
+        judged = image_analysis.get(image_id, {})
+        if judged.get("is_global_default"):
+            continue
+
+        relevance = int(judged.get("relevance_score") or 0)
+        suitability = int(judged.get("suitability_score") or 0)
+        image_type = judged.get("image_type", "unclear")
+        if relevance < 30:
+            continue
+
+        type_bonus = {
+            "model_shot": 24,
+            "lifestyle": 22,
+            "single_product": 18,
+            "detail_shot": 10,
+            "multi_product": -15,
+            "collage": -25,
+            "unclear": -5,
+        }.get(image_type, -5)
+
+        ranked_images.append((suitability + relevance + type_bonus, image_id, image_type))
+
+    ranked_images.sort(reverse=True)
+
+    for scene_number in range(1, scene_count + 1):
+        if scene_number in by_scene:
+            continue
+
+        selected = None
+        for score, image_id, image_type in ranked_images:
+            if image_id not in used_ids:
+                selected = (score, image_id, image_type)
+                break
+
+        if selected is None and ranked_images:
+            selected = ranked_images[(scene_number - 1) % len(ranked_images)]
+
+        if selected:
+            score, image_id, image_type = selected
+            used_ids.add(image_id)
+            by_scene[scene_number] = {
+                "scene_number": scene_number,
+                "image_id": image_id,
+                "image_score": max(0, min(100, int(score / 2))),
+                "reason_ko": (
+                    "자동 보정 추천: 현재 상품과 관련성이 높고 "
+                    f"단일 이미지 기반 Kling 생성에 적합한 {image_type} 이미지입니다."
+                ),
+                "cautions_ko": "실제 상품 색상과 패턴이 정확한지 최종 확인해주세요.",
+                "suggested_motion": (
+                    "subtle natural movement, gentle camera push-in, "
+                    "slight parallax, keep the product perfectly faithful"
+                ),
+                "source": "heuristic_single_image_guard",
+            }
+
+    analysis["scene_image_recommendations"] = [
+        by_scene[scene_number]
+        for scene_number in sorted(by_scene)
+        if scene_number <= scene_count
+    ][:scene_count]
+    return analysis
+
+
+def scene_image_label(item: dict) -> str:
+    return (
+        f"Scene {item.get('scene_number')} 추천 | "
+        f"이미지 {item.get('image_id')} | "
+        f"{item.get('image_score')}점"
+    )
+
+
+def selected_image_by_id(images: list[dict], image_id: str) -> dict | None:
+    for image in images:
+        if str(image.get("image_id")) == str(image_id):
+            return image
+    return None
+
 def pair_label(pair: dict) -> str:
     return (
         f"추천 {pair.get('rank')} | "
@@ -1209,25 +1346,37 @@ def generate_storyboard(
     return result
 
 
-def assign_default_pairs_to_storyboard(
+def assign_default_images_to_storyboard(
     storyboard: dict,
-    pair_recommendations: list[dict],
+    scene_image_recommendations: list[dict],
 ) -> dict:
+    """Assign one reference image to each StoryFlow scene."""
     scenes = storyboard.get("scenes", [])
+    recommendations = {
+        int(item.get("scene_number")): item
+        for item in scene_image_recommendations
+        if item.get("scene_number")
+    }
 
-    if not pair_recommendations:
-        return storyboard
+    for scene in scenes:
+        scene_number = int(scene.get("scene_number") or 0)
+        recommendation = recommendations.get(scene_number)
+        if not recommendation:
+            continue
 
-    for index, scene in enumerate(scenes):
-        pair = pair_recommendations[
-            min(index, len(pair_recommendations) - 1)
-        ]
+        scene["reference_image_id"] = recommendation.get("image_id")
+        scene["image_score"] = recommendation.get("image_score")
+        scene["image_reason_ko"] = recommendation.get("reason_ko")
+        scene["image_cautions_ko"] = recommendation.get("cautions_ko")
+        scene["suggested_motion"] = recommendation.get("suggested_motion")
 
-        scene["start_image_id"] = pair.get("start_image_id")
-        scene["end_image_id"] = pair.get("end_image_id")
-        scene["pair_score"] = pair.get("pair_score")
-        scene["pair_reason_ko"] = pair.get("reason_ko")
-        scene["pair_cautions_ko"] = pair.get("cautions_ko")
+        prompt = scene.get("kling_prompt", "").strip()
+        single_image_instruction = (
+            " Use the selected single reference image as the only visual source. "
+            "Do not create a start-to-end morph or transition between two images."
+        )
+        if "single reference image" not in prompt.lower():
+            scene["kling_prompt"] = (prompt + single_image_instruction).strip()
 
     return storyboard
 
@@ -1796,7 +1945,7 @@ def create_storyflow_zip(
     product: dict,
     strategy: dict,
     storyboard: dict,
-    pair_map: dict,
+    image_map: dict,
     final_video: bytes | None,
     srt_text: str,
 ) -> tuple[str, bytes]:
@@ -1830,9 +1979,9 @@ def create_storyflow_zip(
         )
 
         archive.writestr(
-            "scene_pair_map.json",
+            "scene_image_map.json",
             json.dumps(
-                pair_map,
+                image_map,
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -1882,14 +2031,7 @@ def create_storyflow_zip(
 # =========================================================
 
 def default_analysis_start_index(product: dict) -> int:
-    total = len(product.get("images", []))
-    host = urlparse(
-        product.get("url", "")
-    ).netloc.lower()
-
-    if "sockslover" in host and total >= 22:
-        return 22
-
+    """Always start Vision analysis from the first extracted image."""
     return 1
 
 
@@ -2626,6 +2768,102 @@ def render_storyboard_scene(
         return selected_pair
 
 
+
+def render_storyboard_scene_single_image(
+    scene: dict,
+    product: dict,
+    image_options: dict,
+    scene_index: int,
+) -> dict | None:
+    """Render a StoryFlow scene using one Kling reference image."""
+    scene_number = int(scene.get("scene_number") or scene_index + 1)
+
+    with st.container(border=True):
+        st.markdown(f"### Scene {scene_number} · {scene.get('role', '-')}")
+        st.caption(f"{(scene_number - 1) * 5}~{scene_number * 5}초")
+
+        scene["caption_ja"] = st.text_input(
+            "caption",
+            value=scene.get("caption_ja", ""),
+            key=f"scene_caption_{scene_number}",
+            label_visibility="collapsed",
+        )
+
+        st.write("**Visual**")
+        st.write(scene.get("visual_description", "-"))
+        st.write("**Action**")
+        st.write(scene.get("action", "-"))
+        st.write("**Camera**")
+        st.write(scene.get("camera", "-"))
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("**Start State**")
+            st.write(scene.get("starting_state", "-"))
+        with c2:
+            st.write("**End State**")
+            st.write(scene.get("ending_state", "-"))
+
+        st.write("**Continuity**")
+        st.write(scene.get("continuity_instruction", "-"))
+
+        selected_recommendation = None
+        if image_options:
+            labels = list(image_options.keys())
+            preferred_image_id = str(scene.get("reference_image_id", ""))
+            default_index = 0
+            for index, label in enumerate(labels):
+                if str(image_options[label].get("image_id")) == preferred_image_id:
+                    default_index = index
+                    break
+
+            chosen_label = st.selectbox(
+                "이 Scene에 사용할 기준 이미지 1장",
+                options=labels,
+                index=default_index,
+                key=f"scene_single_image_{scene_number}",
+            )
+            selected_recommendation = image_options[chosen_label]
+            selected_image = selected_image_by_id(
+                product.get("images", []),
+                selected_recommendation.get("image_id"),
+            )
+
+            if selected_image:
+                st.image(
+                    selected_image["url"],
+                    caption=f"기준 이미지: 사용 {selected_recommendation.get('image_id')}",
+                    use_container_width=True,
+                )
+
+            st.caption(selected_recommendation.get("reason_ko", ""))
+            if selected_recommendation.get("cautions_ko"):
+                st.warning(selected_recommendation.get("cautions_ko"), icon="⚠️")
+
+            scene["reference_image_id"] = selected_recommendation.get("image_id")
+            scene["image_score"] = selected_recommendation.get("image_score")
+            scene["suggested_motion"] = selected_recommendation.get("suggested_motion")
+
+        st.write("**Kling Prompt**")
+        scene["kling_prompt"] = st.text_area(
+            "kling prompt",
+            value=scene.get("kling_prompt", ""),
+            height=220,
+            key=f"scene_prompt_{scene_number}",
+            label_visibility="collapsed",
+        )
+
+        st.write("**Negative Prompt**")
+        scene["negative_prompt"] = st.text_area(
+            "negative prompt",
+            value=scene.get("negative_prompt", ""),
+            height=120,
+            key=f"scene_negative_{scene_number}",
+            label_visibility="collapsed",
+        )
+
+        return selected_recommendation
+
 def render_clip_uploads(
     storyboard: dict,
 ) -> list[dict]:
@@ -2799,11 +3037,11 @@ def render_shared_image_analysis(
         )
 
     st.subheader(
-        "4. GPT Vision 이미지 분석 & Pair 추천"
+        "4. GPT Vision 이미지 분석"
     )
 
     analyze_clicked = st.button(
-        "GPT Vision으로 분석하고 Pair 추천",
+        "GPT Vision으로 이미지 분석",
         type="primary",
         use_container_width=True,
         key="vision_analyze_button",
@@ -2842,6 +3080,11 @@ def render_shared_image_analysis(
                         analysis_candidates,
                         analysis,
                         video_strategy,
+                    )
+                    analysis = normalize_scene_image_recommendations(
+                        analysis_candidates,
+                        analysis,
+                        scene_count=3,
                     )
 
                     st.session_state[
@@ -3616,10 +3859,10 @@ def render_storyflow(
                     api_key,
                 )
 
-                storyboard = assign_default_pairs_to_storyboard(
+                storyboard = assign_default_images_to_storyboard(
                     storyboard,
                     analysis.get(
-                        "pair_recommendations",
+                        "scene_image_recommendations",
                         [],
                     ),
                 )
@@ -3666,17 +3909,17 @@ def render_storyflow(
         )
     )
 
-    pairs = analysis.get(
-        "pair_recommendations",
+    scene_image_recommendations = analysis.get(
+        "scene_image_recommendations",
         [],
     )
 
-    pair_options = {
-        pair_label(pair): pair
-        for pair in pairs
+    image_options = {
+        scene_image_label(item): item
+        for item in scene_image_recommendations
     }
 
-    scene_pair_map = {}
+    scene_image_map = {}
 
     for index, scene in enumerate(
         storyboard.get(
@@ -3684,29 +3927,20 @@ def render_storyflow(
             [],
         )
     ):
-        selected_pair = render_storyboard_scene(
+        selected_recommendation = render_storyboard_scene_single_image(
             scene,
             product,
-            pair_options,
+            image_options,
             index,
         )
 
-        if selected_pair:
-            scene_pair_map[
-                str(
-                    scene.get(
-                        "scene_number"
-                    )
-                )
-            ] = selected_pair
+        if selected_recommendation:
+            scene_image_map[
+                str(scene.get("scene_number"))
+            ] = selected_recommendation
 
-    st.session_state[
-        "storyboard"
-    ] = storyboard
-
-    st.session_state[
-        "scene_pair_map"
-    ] = scene_pair_map
+    st.session_state["storyboard"] = storyboard
+    st.session_state["scene_image_map"] = scene_image_map
 
     st.subheader(
         "7. Kling 영상 업로드"
@@ -3714,7 +3948,7 @@ def render_storyflow(
 
     st.caption(
         (
-            "각 Scene 프롬프트를 Kling에 붙여넣고 5초 무음 영상을 생성한 뒤 "
+            "각 Scene에 추천된 기준 이미지 1장과 프롬프트를 Kling에 넣고 5초 무음 영상을 생성한 뒤 "
             "Scene 1~3 순서대로 업로드하세요."
         )
     )
@@ -3825,7 +4059,7 @@ def render_storyflow(
         product=product,
         strategy=strategy,
         storyboard=storyboard,
-        pair_map=scene_pair_map,
+        image_map=scene_image_map,
         final_video=final_video,
         srt_text=srt_text,
     )
@@ -4026,7 +4260,7 @@ def main() -> None:
                         "regen_prompt",
                         "content_strategy",
                         "storyboard",
-                        "scene_pair_map",
+                        "scene_image_map",
                         "final_video",
                     ]:
                         st.session_state.pop(
